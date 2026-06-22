@@ -34,7 +34,9 @@ This repository contains the replication code for my thesis, which investigates 
 
 ## Data Not Included (Confidential)
 
-The following files contain confidential microdata provided by the **Central Statistical Office (CSO), Saint Lucia** and cannot be shared publicly. Researchers seeking access should contact the CSO directly.
+The original analysis was conducted on the full census microdata files provided by the **Central Statistical Office (CSO), Saint Lucia**. These files cannot be shared publicly. For this replication package, the variables required for all regressions and figures were extracted from the raw files and saved as `hh_panel_replication.csv` and `iddetail_str.csv` (see Repository Contents above). All results in the thesis are reproducible from those derived files alone.
+
+Researchers who wish to replicate the full derivation pipeline from raw microdata should contact the CSO directly to request access to the files below.
 
 | File | Description |
 |---|---|
