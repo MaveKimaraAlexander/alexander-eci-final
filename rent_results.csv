@@ -1,0 +1,7 @@
+"model","term","estimate","std_error","p_value","nobs","r2","adj_r2"
+"(4) No controls","(Intercept)",6.21955,0.01234,0,5643,0.0233,0.0231
+"(4) No controls","tpi",1.26931,0.123081,0,5643,0.0233,0.0231
+"(5) Unit controls","(Intercept)",5.698385,0.030323,0,5643,0.1041,0.1036
+"(5) Unit controls","tpi",1.21105,0.119182,0,5643,0.1041,0.1036
+"(5) Unit controls","bedrooms",0.313081,0.01545,0,5643,0.1041,0.1036
+"(5) Unit controls","household_size",-0.036241,0.007954,0,5643,0.1041,0.1036

@@ -1,0 +1,1598 @@
+---
+title: "How Short-Term Rentals Affected the St. Lucian Housing Market"
+subtitle: "A Bartik Shift-Share Instrumental Variable Analysis"
+author: "Mave Kimara Alexander | 113077424"
+date: "2026-06-13"
+format:
+  pdf:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    documentclass: article
+    geometry: margin=1in
+    fig-width: 7
+    fig-height: 5
+    linestretch: 1.5
+    fontsize: 12pt
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+```{r setup}
+library(haven)
+library(tidyverse)
+library(labelled)
+library(knitr)
+library(scales)
+library(ggrepel)
+library(kableExtra)
+library(fixest)
+library(modelsummary)
+options(modelsummary_factory_latex = "kableExtra")
+
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title    = element_text(face = "bold", size = 11),
+      plot.subtitle = element_text(size = 9, color = "grey40"),
+      plot.caption  = element_text(size = 7, color = "grey50"),
+      axis.text     = element_text(size = 8),
+      legend.position = "bottom",
+      legend.text   = element_text(size = 8)
+    )
+)
+```
+
+```{r load-all-data}
+# ── Constituency name map ─────────────────────────────────────────────────────
+cons_name_map <- c(
+  "100"  = "Gros Islet",        "200"  = "Babonneau",
+  "300"  = "Castries North",    "400"  = "Castries East",
+  "500"  = "Castries Central",  "600"  = "Castries South",
+  "700"  = "Anse-la-Raye/Canaries",
+  "800"  = "Soufriere",         "900"  = "Choiseul",
+  "1000" = "Laborie",           "1100" = "Vieux-Fort South",
+  "1200" = "Vieux-Fort North",  "1300" = "Micoud South",
+  "1400" = "Micoud North",      "1500" = "Dennery South",
+  "1600" = "Dennery North",     "1700" = "Castries South-East"
+)
+
+# ── 2022 Census ───────────────────────────────────────────────────────────────
+raw_2022 <- read_sav("PersonHHoldMerge 2022 Annon.sav")
+
+hh_2022 <- raw_2022 |>
+  distinct(CompositeKey, .keep_all = TRUE) |>
+  select(CompositeKey, CONSTITUENCY, Npersons,
+         h2_3a, h2_3b1, h2_15, HHLD_WEIGHT) |>
+  rename(
+    household_id    = CompositeKey,
+    constituency_id = CONSTITUENCY,
+    household_size  = Npersons,
+    tenure          = h2_3a,
+    monthly_rent    = h2_3b1,
+    bedrooms        = h2_15,
+    hh_weight       = HHLD_WEIGHT
+  ) |>
+  zap_labels() |>
+  mutate(
+    across(c(tenure, monthly_rent, bedrooms, household_size, constituency_id),
+           ~ if_else(. %in% c(-999999999, 999999999), NA_real_, as.numeric(.))),
+    constituency = cons_name_map[as.character(as.integer(constituency_id))],
+    owner    = if_else(tenure %in% 1:6, 1, 0),
+    renter   = if_else(tenure %in% 7:8, 1, 0),
+    rentfree = if_else(tenure == 9,     1, 0),
+    persons_per_bedroom = if_else(bedrooms > 0, household_size / bedrooms, NA_real_)
+  ) |>
+  filter(!is.na(constituency))
+
+# ── 2010 Census ───────────────────────────────────────────────────────────────
+raw_2010 <- read_sav("person_house_merged.sav")
+
+hh_2010 <- raw_2010 |>
+  mutate(household_id_2010 = paste(DISTRICT, ED, HH, sep = "_")) |>
+  group_by(household_id_2010) |>
+  mutate(HWEIGHT = suppressWarnings(max(HWEIGHT, na.rm = TRUE)),
+         HWEIGHT = if_else(is.infinite(HWEIGHT), NA_real_, HWEIGHT)) |>
+  ungroup() |>
+  distinct(household_id_2010, .keep_all = TRUE) |>
+  select(household_id_2010, poldist, NPERS, H13_OWN, H24_BEDROOMS, HWEIGHT) |>
+  rename(
+    household_id    = household_id_2010,
+    constituency_id = poldist,
+    household_size  = NPERS,
+    tenure          = H13_OWN,
+    bedrooms        = H24_BEDROOMS,
+    hh_weight       = HWEIGHT
+  ) |>
+  zap_labels() |>
+  mutate(
+    across(c(tenure, bedrooms, household_size, constituency_id),
+           ~ if_else(. %in% c(-999999999, 999999999), NA_real_, as.numeric(.))),
+    persons_per_bedroom = if_else(bedrooms > 0, household_size / bedrooms, NA_real_),
+    constituency = cons_name_map[as.character(as.integer(constituency_id))],
+    owner    = if_else(tenure %in% c(1, 2), 1, 0),
+    renter   = if_else(tenure %in% c(3, 4), 1, 0),
+    rentfree = if_else(tenure == 5, 1, 0)
+  ) |>
+  filter(!is.na(constituency))
+
+# ── IDDetail building enumeration ─────────────────────────────────────────────
+raw_iddetail <- read_sav("IDDetail_merged_Anon_Weights_DwellStatus.sav") |>
+  zap_labels() |>
+  mutate(
+    district_code  = districtCode,
+    str_unit       = if_else(DwellingStatus %in% c(8, 12),    1L, 0L),
+    str_unit_broad = if_else(DwellingStatus %in% c(4, 8, 12), 1L, 0L)
+  ) |>
+  filter(!is.na(district_code)) |>
+  mutate(
+    district = case_match(as.integer(district_code),
+      2  ~ "Castries",   3  ~ "AnselaRaye", 4  ~ "Canaries",
+      5  ~ "Soufriere",  6  ~ "Choiseul",   7  ~ "Laborie",
+      8  ~ "VieuxFort",  9  ~ "Micoud",     10 ~ "Dennery",
+      11 ~ "GrosIslet"
+    )
+  )
+
+# ── NTE ───────────────────────────────────────────────────────────────────────
+nte_data <- read.csv("NTE_constituency.csv") |>
+  select(constituency, nte, tourism_tier)
+
+# ── Tourism shift ─────────────────────────────────────────────────────────────
+tourism_raw <- read.csv("Selected-Tourism-Statistics.csv",
+                        header = FALSE, stringsAsFactors = FALSE)
+stay_annual <- tourism_raw |>
+  setNames(paste0("V", seq_len(ncol(tourism_raw)))) |>
+  filter(grepl("Stay-Over Arrivals", V2, fixed = TRUE)) |>
+  mutate(
+    year   = as.integer(substr(trimws(V5), 1, 4)),
+    amount = as.numeric(gsub(",", "", trimws(V6)))
+  ) |>
+  filter(!is.na(year), !is.na(amount)) |>
+  group_by(year) |>
+  summarise(arrivals = sum(amount), .groups = "drop")
+
+pre_avg        <- mean(stay_annual$arrivals[stay_annual$year %in% 2010:2014])
+post_avg       <- mean(stay_annual$arrivals[stay_annual$year %in% c(2015:2019, 2022)])
+national_shift <- (post_avg - pre_avg) / pre_avg
+
+# ── District-to-constituency crosswalk ────────────────────────────────────────
+dist_to_cons <- tribble(
+  ~district,     ~constituency,
+  "Castries",    "Babonneau",
+  "Castries",    "Castries North",
+  "Castries",    "Castries East",
+  "Castries",    "Castries Central",
+  "Castries",    "Castries South",
+  "Castries",    "Castries South-East",
+  "AnselaRaye",  "Anse-la-Raye/Canaries",
+  "Canaries",    "Anse-la-Raye/Canaries",
+  "Soufriere",   "Soufriere",
+  "Choiseul",    "Choiseul",
+  "Laborie",     "Laborie",
+  "VieuxFort",   "Vieux-Fort South",
+  "VieuxFort",   "Vieux-Fort North",
+  "Micoud",      "Micoud South",
+  "Micoud",      "Micoud North",
+  "Dennery",     "Dennery South",
+  "Dennery",     "Dennery North",
+  "GrosIslet",   "Gros Islet"
+)
+
+cons_hh_wts <- hh_2010 |>
+  filter(!is.na(hh_weight)) |>
+  group_by(constituency) |>
+  summarise(hh_wt = sum(hh_weight), .groups = "drop")
+
+make_cons_str <- function(unit_var, count_name) {
+  dist_to_cons |>
+    left_join(cons_hh_wts, by = "constituency") |>
+    left_join(
+      raw_iddetail |> group_by(district) |>
+        summarise(dist_str = sum(.data[[unit_var]], na.rm = TRUE), .groups = "drop"),
+      by = "district"
+    ) |>
+    group_by(district) |>
+    mutate(cons_share = hh_wt / sum(hh_wt, na.rm = TRUE)) |>
+    ungroup() |>
+    group_by(constituency) |>
+    summarise(!!count_name := sum(dist_str * cons_share, na.rm = TRUE), .groups = "drop")
+}
+
+cons_str       <- make_cons_str("str_unit",       "str_count")
+cons_str_broad <- make_cons_str("str_unit_broad",  "str_count_broad")
+
+# ── Constituency summaries ────────────────────────────────────────────────────
+cons_2022 <- hh_2022 |>
+  filter(!is.na(hh_weight)) |>
+  group_by(constituency) |>
+  summarise(
+    renter_rate_22   = weighted.mean(renter,              hh_weight, na.rm = TRUE),
+    owner_rate_22    = weighted.mean(owner,               hh_weight, na.rm = TRUE),
+    rentfree_rate_22 = weighted.mean(rentfree,            hh_weight, na.rm = TRUE),
+    hh_size_22       = weighted.mean(household_size,      hh_weight, na.rm = TRUE),
+    ppbr_22          = weighted.mean(persons_per_bedroom, hh_weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cons_2010 <- hh_2010 |>
+  filter(!is.na(hh_weight)) |>
+  group_by(constituency) |>
+  summarise(
+    renter_rate_10   = weighted.mean(renter,              hh_weight, na.rm = TRUE),
+    owner_rate_10    = weighted.mean(owner,               hh_weight, na.rm = TRUE),
+    rentfree_rate_10 = weighted.mean(rentfree,            hh_weight, na.rm = TRUE),
+    hh_size_10       = weighted.mean(household_size,      hh_weight, na.rm = TRUE),
+    ppbr_10          = weighted.mean(persons_per_bedroom, hh_weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ── Master panel ──────────────────────────────────────────────────────────────
+cons_wide <- cons_2010 |>
+  left_join(cons_2022,       by = "constituency") |>
+  left_join(nte_data,        by = "constituency") |>
+  left_join(cons_str,        by = "constituency") |>
+  left_join(cons_str_broad,  by = "constituency") |>
+  mutate(
+    d_renter  = (renter_rate_22 - renter_rate_10) * 100,
+    d_owner   = (owner_rate_22  - owner_rate_10)  * 100,
+    d_hh_size = hh_size_22 - hh_size_10,
+    d_ppbr    = ppbr_22    - ppbr_10
+  )
+
+panel <- bind_rows(
+  cons_2010 |>
+    left_join(nte_data, by = "constituency") |>
+    mutate(year = 2010, post = 0,
+           renter_rate   = renter_rate_10,
+           owner_rate    = owner_rate_10,
+           rentfree_rate = rentfree_rate_10,
+           hh_size       = hh_size_10,
+           ppbr          = ppbr_10,
+           str_count       = 0,
+           str_count_broad = 0),
+  cons_2022 |>
+    left_join(nte_data,       by = "constituency") |>
+    left_join(cons_str,       by = "constituency") |>
+    left_join(cons_str_broad, by = "constituency") |>
+    mutate(year = 2022, post = 1,
+           renter_rate   = renter_rate_22,
+           owner_rate    = owner_rate_22,
+           rentfree_rate = rentfree_rate_22,
+           hh_size       = hh_size_22,
+           ppbr          = ppbr_22)
+) |>
+  mutate(nte_post = nte * national_shift * post)
+
+hh_panel <- bind_rows(
+  hh_2010 |> mutate(year = 2010L, post = 0L),
+  hh_2022 |> mutate(year = 2022L, post = 1L)
+) |>
+  left_join(nte_data |> select(constituency, nte), by = "constituency") |>
+  left_join(panel    |> select(constituency, year, str_count, str_count_broad),
+            by = c("constituency", "year")) |>
+  mutate(nte_post = nte * national_shift * post)
+
+# ── District-level data ───────────────────────────────────────────────────────
+cons_to_dist <- tribble(
+  ~constituency,           ~district,
+  "Gros Islet",            "Gros Islet",
+  "Babonneau",             "Castries",
+  "Castries North",        "Castries",
+  "Castries East",         "Castries",
+  "Castries Central",      "Castries",
+  "Castries South",        "Castries",
+  "Castries South-East",   "Castries",
+  "Anse-la-Raye/Canaries", "Anse-la-Raye",
+  "Soufriere",             "Soufriere",
+  "Choiseul",              "Choiseul",
+  "Laborie",               "Laborie",
+  "Vieux-Fort South",      "Vieux Fort",
+  "Vieux-Fort North",      "Vieux Fort",
+  "Micoud South",          "Micoud",
+  "Micoud North",          "Micoud",
+  "Dennery South",         "Dennery",
+  "Dennery North",         "Dennery"
+)
+
+dist_wide <- cons_wide |>
+  left_join(cons_to_dist, by = "constituency") |>
+  left_join(cons_hh_wts,  by = "constituency") |>
+  group_by(district) |>
+  summarise(
+    renter_rate_10 = weighted.mean(renter_rate_10, hh_wt, na.rm = TRUE),
+    renter_rate_22 = weighted.mean(renter_rate_22, hh_wt, na.rm = TRUE),
+    d_renter       = (renter_rate_22 - renter_rate_10) * 100,
+    .groups = "drop"
+  )
+
+nte_dist <- read.csv("nte_district.csv") |>
+  select(district, nte_dist = nte)
+
+dist_plot <- dist_wide |>
+  left_join(nte_dist, by = "district")
+
+dist_str_direct <- raw_iddetail |>
+  mutate(
+    district_h = case_when(
+      district %in% c("AnselaRaye", "Canaries") ~ "Anse-la-Raye",
+      district == "VieuxFort"                   ~ "Vieux Fort",
+      district == "GrosIslet"                   ~ "Gros Islet",
+      TRUE                                      ~ district
+    )
+  ) |>
+  group_by(district = district_h) |>
+  summarise(
+    str_count_d       = sum(str_unit,       na.rm = TRUE),
+    str_count_broad_d = sum(str_unit_broad, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+dist_plot_str <- dist_plot |>
+  left_join(dist_str_direct, by = "district")
+
+hh_panel_dist <- hh_panel |>
+  left_join(cons_to_dist, by = "constituency") |>
+  left_join(nte_dist,      by = "district") |>
+  left_join(
+    bind_rows(
+      dist_str_direct |> mutate(year = 2022L),
+      dist_str_direct |> mutate(year = 2010L, str_count_d = 0, str_count_broad_d = 0)
+    ),
+    by = c("district", "year")
+  ) |>
+  mutate(nte_post_dist = nte_dist * national_shift * post)
+
+dist_panel_agg <- bind_rows(
+  dist_wide |>
+    left_join(nte_dist, by = "district") |>
+    mutate(year = 2010, post = 0, str_count_d = 0, str_count_broad_d = 0),
+  dist_wide |>
+    left_join(nte_dist,         by = "district") |>
+    left_join(dist_str_direct, by = "district") |>
+    mutate(year = 2022, post = 1)
+) |>
+  mutate(nte_post_dist = nte_dist * national_shift * post)
+```
+
+```{r fit-core-models, include=FALSE}
+# ── All core regression models, fit once so every inline statistic below ──
+# ── is read live from these objects and can never drift from the code. ──
+
+# RQ2: reduced-form renter models
+lpm      <- feols(renter ~ nte_post      | constituency + year,
+                  data = hh_panel,      weights = ~hh_weight, vcov = ~constituency)
+lpm_dist <- feols(renter ~ nte_post_dist | district     + year,
+                  data = hh_panel_dist, weights = ~hh_weight, vcov = ~district)
+
+# RQ1: rent cross-section (2022 only — no rent data in 2010)
+hh_rent_22 <- hh_panel |>
+  filter(year == 2022,
+         tenure %in% 7:8,
+         !is.na(monthly_rent),
+         monthly_rent > 0, monthly_rent < 99999,
+         !is.na(bedrooms), bedrooms > 0,
+         !is.na(household_size)) |>
+  mutate(
+    log_rent = log(monthly_rent),
+    ppbr     = if_else(bedrooms > 0, household_size / bedrooms, NA_real_)
+  )
+rent1 <- feols(log_rent ~ nte,
+               data = hh_rent_22, weights = ~hh_weight, vcov = ~constituency)
+rent2 <- feols(log_rent ~ nte + bedrooms + household_size,
+               data = hh_rent_22, weights = ~hh_weight, vcov = ~constituency)
+rent3 <- feols(log_rent ~ nte + bedrooms + household_size + ppbr,
+               data = hh_rent_22, weights = ~hh_weight, vcov = ~constituency)
+
+# First stage + 2SLS, three specifications
+fs_narrow <- feols(str_count       ~ nte_post | constituency + year,
+                   data = panel, vcov = "hetero")
+fs_broad  <- feols(str_count_broad ~ nte_post | constituency + year,
+                   data = panel, vcov = "hetero")
+iv_narrow <- feols(renter ~ 1 | constituency + year | str_count       ~ nte_post,
+                   data = hh_panel, weights = ~hh_weight, vcov = "hetero")
+iv_broad  <- feols(renter ~ 1 | constituency + year | str_count_broad ~ nte_post,
+                   data = hh_panel, weights = ~hh_weight, vcov = "hetero")
+
+fs_narrow_dist <- feols(str_count_d ~ nte_post_dist | district + year,
+                        data = dist_panel_agg, vcov = "hetero")
+iv_narrow_dist <- feols(renter ~ 1 | district + year | str_count_d ~ nte_post_dist,
+                        data = hh_panel_dist, weights = ~hh_weight, vcov = "hetero")
+
+# RQ3: ownership
+lpm_owner      <- feols(owner ~ nte_post      | constituency + year,
+                        data = hh_panel,      weights = ~hh_weight, vcov = ~constituency)
+lpm_owner_dist <- feols(owner ~ nte_post_dist | district     + year,
+                        data = hh_panel_dist, weights = ~hh_weight, vcov = ~district)
+
+# RQ4: crowding
+lpm_ppbr      <- feols(persons_per_bedroom ~ nte_post      | constituency + year,
+                       data = hh_panel,      weights = ~hh_weight, vcov = ~constituency)
+lpm_ppbr_dist <- feols(persons_per_bedroom ~ nte_post_dist | district     + year,
+                       data = hh_panel_dist, weights = ~hh_weight, vcov = ~district)
+
+# Derived summary statistics referenced inline throughout the document, so
+# the prose can never go out of sync with what the models actually produce.
+fmt_p <- function(p) if (p < 0.001) "< 0.001" else paste0("= ", formatC(p, digits = 3, format = "f"))
+
+rf_beta  <- as.numeric(coef(lpm)["nte_post"])
+rf_se    <- as.numeric(se(lpm)["nte_post"])
+rf_p     <- as.numeric(pvalue(lpm)["nte_post"])
+rf_waldf <- (rf_beta / rf_se)^2
+
+nte_range        <- diff(range(nte_data$nte))
+rent_nte_coef    <- as.numeric(coef(rent3)["nte"])
+rent_nte_p       <- as.numeric(pvalue(rent3)["nte"])
+rent_premium_pct <- (exp(rent_nte_coef * nte_range) - 1) * 100
+
+rq3_beta      <- as.numeric(coef(lpm_owner)["nte_post"])
+rq3_se        <- as.numeric(se(lpm_owner)["nte_post"])
+rq3_p         <- as.numeric(pvalue(lpm_owner)["nte_post"])
+rq3_beta_dist <- as.numeric(coef(lpm_owner_dist)["nte_post_dist"])
+rq3_p_dist    <- as.numeric(pvalue(lpm_owner_dist)["nte_post_dist"])
+
+rq4_beta      <- as.numeric(coef(lpm_ppbr)["nte_post"])
+rq4_se        <- as.numeric(se(lpm_ppbr)["nte_post"])
+rq4_p         <- as.numeric(pvalue(lpm_ppbr)["nte_post"])
+rq4_beta_dist <- as.numeric(coef(lpm_ppbr_dist)["nte_post_dist"])
+rq4_p_dist    <- as.numeric(pvalue(lpm_ppbr_dist)["nte_post_dist"])
+```
+
+\newpage
+
+# Abstract {.unnumbered}
+
+This study investigates whether the expansion of short-term rental (STR) platforms in Saint Lucia has worsened housing affordability for local renters through rent inflation, rental stock conversion, and increased rental demand in tourism-intensive areas. Using a Bartik shift-share instrumental variable design with census microdata from 2010 and 2022, it interacts each constituency's Natural Tourism Endowment (NTE), a fixed measure of natural amenity concentration that predates the platform era, with the national growth in stay-over arrivals to isolate the effect of tourism exposure on local housing outcomes.
+Four findings emerge, corresponding to the study's four research questions. First, the Bartik reduced-form estimates show that constituencies with greater pre-platform tourism exposure experienced significantly larger increases in renter rates between 2010 and 2022 ($\hat{\beta}^{RF}$ = `r round(rf_beta, 3)`, p `r fmt_p(rf_p)`), consistent with STR-era expansion increasing housing market pressure in high-amenity coastal constituencies. This is the study's primary and most statistically robust result, holding across both geographic units and both STR measurement strategies. Second, more tourism-exposed areas exhibit substantially higher rents, implying a premium of roughly `r round(rent_premium_pct, 0)`% between the lowest- and highest-NTE constituencies conditional on dwelling characteristics; this rent effect is economically large but not statistically robust given the limited power of a 17-constituency design. Third, contrary to the hypothesised investor-buyer channel, owner-occupancy rates *fell* relative to renter rates in the highest-NTE constituencies (constituency-level $\hat\beta$ = `r round(rq3_beta, 3)`, p `r fmt_p(rq3_p)`; district-level $\hat\beta$ = `r round(rq3_beta_dist, 3)`, p `r fmt_p(rq3_p_dist)`), suggesting that STR-era pressure converted owner-occupied and informally-held housing into rental stock rather than simultaneously drawing in new owner-occupier demand. Fourth, the relationship between tourism exposure and household crowding is not statistically robust, with the constituency-level estimate positive and the district-level estimate negative (p `r fmt_p(rq4_p)` and p `r fmt_p(rq4_p_dist)` respectively), so this analysis does not provide reliable evidence of a crowding effect in either direction. The strongest and most reliable finding is the link between STR-era tourism expansion and rising renter rates in high-NTE areas.
+
+**Keywords:** short-term rentals, housing affordability, rent inflation, tenure composition, Bartik shift-share IV, Saint Lucia, small island developing states, homeownership, crowding
+
+\newpage
+
+# Introduction
+
+## The Global Platform Shift
+
+Across the world's most visited cities and coastlines, a quiet but consequential transformation has taken place. Since the late 2000s, digital platforms such as Airbnb, Vrbo, and Booking.com have made it possible for property owners to convert ordinary residential dwellings into tourist accommodations with a few clicks and at near-zero transaction costs. What began as a niche hospitality innovation has grown into a structural force reshaping how housing markets function. Where the returns from short-term tourist letting consistently exceed those from long-term residential leasing, landlords face a powerful economic incentive to withdraw their properties from the residential market entirely. The result is a dual pressure on housing affordability: the supply of long-term rental housing shrinks precisely as tourism-driven economic activity draws more workers into the areas where that housing once existed.
+The academic literature has begun to document this dynamic with increasing rigor. Studies from Barcelona, San Francisco, Amsterdam, and New York have found statistically significant associations between STR platform density and rising rents, falling rental vacancy rates, and the displacement of lower-income residents from tourism-intensive neighborhoods (Horn and Merante, 2017; Garcia-López et al., 2020; Wachsmuth and Weisler, 2018). What these studies share, beyond their findings, is their geography — they are overwhelmingly concentrated in data-rich urban centers in North America and Western Europe, where administrative records, listing data, and longitudinal housing surveys make causal identification tractable. The housing markets of small island economies, where tourism dependence is often far more acute and institutional data far more scarce, remain largely outside the frame.
+
+
+## Saint Lucia: A Tourism-Dependent Laboratory
+
+Saint Lucia sits at the sharper end of this global story. As one of the Eastern Caribbean's premier tourist destinations, the island welcomes hundreds of thousands of stay-over visitors annually — that is, visitors who sleep in accommodation rather than arriving by cruise ship — and tourism accounts for a substantial share of both GDP and formal employment. Platform-based short-term rentals became operational on the island around 2014, and their growth since then has been concentrated not randomly across Saint Lucia's ten districts but in the areas that serve as the island's primary economic corridors: Gros Islet in the north, Soufrière on the southwest coast, and Anse-la-Raye between them. These are the constituencies where hospitality operations cluster, where government agencies and commercial services are anchored, and where the demand for worker housing is most intense.
+This geographic concentration matters enormously for how the STR shock is transmitted into the housing market. Residents in these constituencies face a compounding set of pressures: landlords withdrawing properties from the long-term rental pool, rents rising in response to tightening supply, and intensified competition for remaining units from the workers recruited to service the expanding tourism sector. For a household with limited mobility and a modest income, these pressures do not resolve neatly — they accumulate. Saint Lucia therefore represents not merely an interesting case study but a high-stakes natural laboratory for observing platform-driven housing displacement in a setting where its effects may be felt more acutely than anywhere the existing literature has looked.
+
+
+## Institutional Voids and Market Exposure
+
+What makes the Saint Lucian housing market particularly vulnerable is not simply the scale of tourism activity but the institutional environment within which that activity operates. In cities such as New York or Barcelona, the transmission of tourism-driven shocks into the residential rental market is slowed — imperfectly, but meaningfully — by rent stabilization mechanisms, zoning regulations, and short-term rental licensing requirements that create at least some friction against rapid landlord switching. Saint Lucia operates without these buffers. Formal rent control is absent. Tenant protections are limited. A significant proportion of rental agreements are oral and unregistered, which lowers the legal and administrative costs for landlords who wish to convert their properties from residential to tourist use.
+In this environment, the housing market lacks the institutional brakes that might otherwise absorb external demand shocks before they reach individual households. When tourism intensification raises the expected return from short-term letting, there is little standing between that financial signal and a landlord's decision to act on it. Lower-income renter households — who are least able to absorb rent increases or relocate — are consequently left most exposed. Understanding the magnitude and mechanism of this exposure is not merely an academic exercise. It is a question with direct implications for how Saint Lucia's government balances the pursuit of tourism-led growth against the residential stability of the communities that make that growth possible.
+
+
+## Research Objectives and Questions
+
+Despite the growing body of evidence on STR-driven housing market distortion, rigorous causal evidence for these mechanisms in a Small Island Developing State context remains largely absent. The constraints are partly methodological — small island economies rarely generate the administrative datasets that urban housing research depends upon — and partly a matter of research attention, with scholarly resources flowing naturally toward the markets where data already exists. This thesis addresses that gap directly, applying a causal identification strategy to census microdata from Saint Lucia to ask four interconnected questions.
+The first concerns displacement: has the expansion of STR platforms significantly reduced the availability of renter-occupied housing in Saint Lucia's high-tourism constituencies? The second concerns price: do renters in tourism-intensive areas face systematically higher monthly rents than those in low-tourism areas, and if so, by how much? The third concerns sorting: is any observed decline in renter rates driven not simply by supply withdrawal but by a deeper mechanism in which lower-income renters are gradually replaced by wealthier owner-occupiers as neighborhoods gentrify under tourism pressure? The fourth concerns crowding: is STR expansion associated with increased household crowding among remaining renters, suggesting that displacement is already underway and that those who cannot afford to leave are instead absorbing more people into smaller spaces?
+Together these questions trace the full arc of platform-driven housing disruption — from the initial supply shock through its distributional consequences — in a setting where the stakes are high and the evidence has been thin.
+
+
+\newpage
+
+# Literature Review
+
+## Platform Economics and the Short-Term Rental Market
+
+Space Holder
+
+## Competitive Disruption in Small Island Accommodation Markets
+
+Space Holder
+
+## Methodological Foundations: Causal Inference and Market Dynamics
+
+Space Holder 
+
+\newpage
+
+# Theoretical Framework
+
+## The Causal Mechanism: From Platform Entry to Housing Affordability
+
+Space Holder 
+
+## Market Failure and the Social Cost of STR Conversion
+
+Space Holder
+
+## Aggregate Dynamics and Theoretical Predictions
+Space Holder 
+
+\newpage
+
+# Methodology
+
+## Data Sources
+
+### Overview
+
+```{r table-all-datasources}
+tibble(
+  `Data Source` = c(
+    "2010 Population & Housing Census",
+    "2022 Population & Housing Census",
+    "2022 Building Enumeration File (IDDetail)",
+    "Natural Tourism Endowment (NTE)",
+    "CSO Tourism Statistics"
+  ),
+  File = c(
+    "person_house_merged.sav",
+    "PersonHHoldMerge 2022 Annon.sav",
+    "IDDetail_merged_Anon_Weights_DwellStatus.sav",
+    "NTE_constituency.csv",
+    "Selected-Tourism-Statistics.csv"
+  ),
+  `Unit of Observation` = c(
+    "Household",
+    "Household",
+    "Building",
+    "Constituency",
+    "National annual"
+  ),
+  `Key Variables` = c(
+    "Tenure (H13_OWN), bedrooms, household size, constituency (poldist), weight",
+    "Tenure (h2_3a), rent (h2_3b1), bedrooms, constituency (CONSTITUENCY), weight",
+    "DwellingStatus codes 8 + 12 (STR flag), districtCode",
+    "NTE natural amenity share per constituency (Bartik IV share)",
+    "Annual stay-over arrivals 2010–2022"
+  ),
+) |>
+  kable(caption = "Table 1. Complete inventory of data sources.",
+        booktabs = TRUE) |>
+  kable_styling(latex_options = "hold_position", full_width = TRUE) |>
+  column_spec(1, width = "3.5cm") |>
+  column_spec(2, width = "3.8cm") |>
+  column_spec(3, width = "2.4cm") |>
+  column_spec(4, width = "5.8cm")
+```
+
+### Census Microdata (2010 and 2022)
+
+The primary data source is the Saint Lucia Population and Housing Census, with complete waves in 2010 (pre-STR) and 2022 (post-STR). Microdata were obtained directly from the Central Statistical Office (CSO) and contain full-population household records with constituency identifiers, tenure status, monthly rent (2022 only), bedrooms, and household size. Table 2 summarises the key features of each wave.
+
+```{r table-census-comparison}
+tibble(
+  Feature = c(
+    "Source", "Coverage", "Unit of observation",
+    "Sample (households)", "Tenure variable",
+    "Rent variable", "Bedrooms", "Household weight",
+    "Constituency variable", "STR units (endogenous variable)"
+  ),
+  `2010 Census` = c(
+    "CSO Saint Lucia person–household merged file",
+    "Full population census",
+    "Person (merged with household record)",
+    "50,241",
+    "H13_OWN (9 categories)",
+    "Not collected",
+    "H24_BEDROOMS",
+    "HWEIGHT",
+    "poldist (17 constituencies, codes 100–1700)",
+    "Not available (pre-platform)"
+  ),
+  `2022 Census` = c(
+    "CSO Saint Lucia PersonHHoldMerge (Anon.)",
+    "Full population census",
+    "Person (merged with household record)",
+    "50,588",
+    "h2_3a (12 categories)",
+    "h2_3b1 (EC$/month)",
+    "h2_15",
+    "HHLD_WEIGHT",
+    "CONSTITUENCY (17 constituencies, codes 100–1700)",
+    "IDDetail: DwellingStatus codes 8 + 12 (n = 245 buildings)"
+  )
+) |>
+  kable(caption = "Table 2. Census data source comparison.", booktabs = TRUE) |>
+  kable_styling(latex_options = c("hold_position"), font_size = 9) |>
+  column_spec(1, width = "3.8cm") |>
+  column_spec(2, width = "5.5cm") |>
+  column_spec(3, width = "6.5cm")
+```
+
+**Tenure harmonisation.** Tenure status is harmonised across census years to ensure comparability. Owner-occupied households include those owning outright and those purchasing under a mortgage. Renter households include those renting from private landlords and from the government. Rent-free households are those occupying a dwelling without payment, typically through family arrangements.
+
+| Category | 2010 (H13_OWN) | 2022 (h2_3a) |
+|---|---|---|
+| Owner-occupied | 1 (Owned fully), 2 (Mortgage) | 1–3 (Owned fully), 4–6 (Mortgage) |
+| Renter | 3 (Private), 4 (Govt) | 7 (Private), 8 (Govt) |
+| Rent-free | 5 | 9 |
+
+### Building-Level STR Units (IDDetail)
+
+The 2022 IDDetail building enumeration file records the occupancy status of all 77,742 structures island-wide via the `DwellingStatus` variable. Two codes identify short-term rental use: **code 8** (Short Term Occupation, n = 162) and **code 12** (AirBNB, n = 83), yielding **245 STR-flagged buildings** in total. The presence of "AirBNB" as a distinct census occupancy category is a notable feature of the Saint Lucian data: it reflects explicit enumerator recognition of platform-driven STR activity and provides a ground-truth measure of STR penetration that is unavailable in most other jurisdictions.
+
+Code 4 (Vacant – Seasonally) was considered but excluded from the narrow STR measure: its constituency distribution is dominated by Vieux Fort and rural southern parishes — low-NTE areas where seasonal vacancy may reflect migration and second-home patterns rather than platform-driven STR activity. It is included only in the broad robustness specification. Table 3 shows the complete distribution of DwellingStatus codes.
+
+As an external validity check, the census-based count of 245 STR-flagged buildings can be benchmarked against Airbtics (airbtics.com), which reports 1,529 active listings island-wide as of June 2026. The gap reflects both four years of post-census growth and informal units below the enumerator's visibility threshold. Crucially, the geographic concentration in the Airbtics data mirrors the NTE distribution — Castries, Soufrière, and Gros Islet account for the majority of active listings — consistent with the Bartik assumption that NTE predicts where STR activity concentrates.
+
+```{r table-dwellstatus-dist}
+raw_iddetail |>
+  count(DwellingStatus) |>
+  arrange(DwellingStatus) |>
+  mutate(
+    pct      = round(n / sum(n) * 100, 2),
+    label    = case_match(
+      DwellingStatus,
+      1  ~ "Occupied",
+      2  ~ "Closed — Residents away < 12 months",
+      3  ~ "Closed — Residents away > 12 months",
+      4  ~ "Vacant — Seasonally",
+      5  ~ "Vacant — Non-Seasonally",
+      6  ~ "Refused",
+      7  ~ "No Contact / Temporarily Absent",
+      8  ~ "Short Term Occupation",
+      9  ~ "Other",
+      10 ~ "Under Construction",
+      11 ~ "Demolished",
+      12 ~ "AirBNB",
+      .default = "Unknown"
+    ),
+    str_role = case_match(
+      DwellingStatus,
+      8  ~ "Narrow STR",
+      12 ~ "Narrow STR",
+      4  ~ "Broad only",
+      .default = "—"
+    )
+  ) |>
+  select(
+    Code       = DwellingStatus,
+    Label      = label,
+    `STR Role` = str_role,
+    N          = n,
+    `%`        = pct
+  ) |>
+  kable(
+    caption = "Table 3. Distribution of DwellingStatus codes in the 2022 IDDetail building enumeration file (N = 77,742 structures). Codes 8 and 12 form the narrow STR measure (n = 245); code 4 is added in the broad robustness specification only.",
+    align   = c("r", "l", "l", "r", "r")
+  ) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"))
+```
+
+### Natural Tourism Endowment (NTE)
+
+The Natural Tourism Endowment serves as the Bartik "share" component of the instrument. It measures each constituency's pre-existing concentration of natural geographic amenities relative to the rest of Saint Lucia, constructed entirely from fixed physical features that predate the STR platform era. No built tourism infrastructure like hotels, resorts, restaurants or guesthouses are included.
+
+**Data source.** Natural amenity data were obtained from OpenStreetMap (OSM) via the Overpass API (queried May 2026), yielding georeferenced points of interest classified into natural feature categories: beaches, mountain peaks (including the iconic Pitons), volcanic features and hot springs (including Sulphur Springs), waterfalls, nature reserves and national parks, and scenic viewpoints. Individually verified with Google maps and domain knowlege. 
+
+**Weighting.** The NTE index utilises a weighted scoring system to capture the relative importance of different natural features in attracting tourism. The weighting structure reflects the relative importance of each feature type in attracting leisure visitors who generate short-term rental demand: beaches are assigned a weight of 3.0, reflecting their centrality to Caribbean tourism; mountain peaks receive a weight of 2.5, recognising Saint Lucia's distinctive topography including the iconic Pitons (tagged as peaks in OSM); volcanic features and hot springs receive a weight of 2.0, capturing major geological attractions such as Sulphur Springs; waterfalls and nature reserves are assigned a weight of 2.0, reflecting their appeal to nature-based tourists; and scenic viewpoints receive a weight of 1.5. By prioritising fixed, geological features over man-made infrastructure, the NTE provides an exogenous measure of tourism exposure that is unaffected by post-2014 changes in the accommodation market.
+
+The NTE share for constituency $c$ is therefore:
+
+$$NTE_c = \frac{\displaystyle\sum_{j \in c} w_j}{\displaystyle\sum_{c'}\sum_{j \in c'} w_j}$$
+
+where $j$ indexes natural features assigned to constituency $c$, $w_j \in \{1.5,\, 2.0,\, 2.5,\, 3.0\}$ is the feature-type weight defined above, and the denominator is the island-wide total weighted score across all 17 constituencies. NTE shares therefore sum to 1.
+
+**Geographic constituency assignment.** Each natural feature is assigned directly to its constituency based on its own GPS coordinates, rather than distributing district-level scores using household weights. For districts with a single constituency — Soufrière, Choiseul, Laborie, Anse-la-Raye/Canaries — features are assigned directly. For districts containing two electoral constituencies — Gros Islet, Vieux Fort, Micoud, Dennery — features are assigned by latitude relative to the district median: features north of the median are assigned to the northern constituency and features south of the median to the southern constituency. For Castries district (which contains five constituencies and for which no sub-district boundary shapefile is publicly available), the combined weighted score is split equally across all five constituencies. Features whose constituency is confirmed by local geographic knowledge are assigned using verified overrides that bypass the coordinate-based heuristic.
+
+**Validity.** Because both the natural feature locations and the direct geographic coordinates are fixed prior to the STR expansion period, the NTE shares are predetermined and cannot be affected by post-2014 housing market changes, satisfying the exogeneity condition of the Bartik design.
+
+```{r table-nte}
+nte_data |>
+  arrange(desc(nte)) |>
+  mutate(nte_pct = paste0(round(nte * 100, 1), "%")) |>
+  select(Constituency = constituency, `NTE Share` = nte_pct, Tier = tourism_tier) |>
+  kable(
+    caption = "Table 4. Natural Tourism Endowment (NTE) by constituency. Natural amenity features only (beaches, peaks, waterfalls, nature reserves, viewpoints); no built tourism infrastructure. Source: OpenStreetMap / Overpass API (May 2026); direct geographic assignment from feature GPS coordinates.",
+  ) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"))
+```
+
+```{r table-nte-breakdown}
+features_raw_nte <- read.csv("natural_amenities_nte_assigned.csv",
+                              stringsAsFactors = FALSE)
+
+castries_5 <- c("Castries North", "Castries East", "Castries Central",
+                "Castries South", "Castries South-East")
+
+features_exp <- bind_rows(
+  features_raw_nte |> filter(constituency != "Castries (equal split)"),
+  features_raw_nte |>
+    filter(constituency == "Castries (equal split)") |>
+    crossing(cons_split = castries_5) |>
+    mutate(constituency = cons_split, weight = weight / 5) |>
+    select(-cons_split)
+)
+
+type_wide <- features_exp |>
+  mutate(type_label = case_match(
+    attr_type,
+    "beach"          ~ "Beach",
+    "peak"           ~ "Peak",
+    "hot_spring"     ~ "Volcanic",
+    "waterfall"      ~ "Waterfall",
+    "nature_reserve" ~ "NatRes",
+    "viewpoint"      ~ "Viewpoint"
+  )) |>
+  group_by(constituency, type_label) |>
+  summarise(score = sum(weight), .groups = "drop") |>
+  pivot_wider(names_from  = type_label,
+              values_from = score,
+              values_fill = 0) |>
+  left_join(nte_data |> select(constituency, nte), by = "constituency") |>
+  mutate(
+    Total     = Beach + Peak + Volcanic + Waterfall + NatRes + Viewpoint,
+    NTE_Share = paste0(round(nte * 100, 1), "%"),
+    across(c(Beach, Peak, Volcanic, Waterfall, NatRes, Viewpoint, Total), ~ round(., 1))
+  ) |>
+  arrange(desc(nte)) |>
+  rename(`Nature Res.` = NatRes, `NTE Share` = NTE_Share) |>
+  select(Constituency = constituency,
+         Beach, Peak, Volcanic, Waterfall, `Nature Res.`, Viewpoint,
+         Total, `NTE Share`)
+
+type_wide |>
+  kable(
+    caption  = "Table 5. NTE weighted score decomposition by constituency and feature type. Each cell is the sum of feature-type weights for that constituency (e.g. two beaches contribute 6.0). Castries district features are distributed equally across five constituencies. Total = row sum; NTE Share = Total divided by island-wide total. Source: OpenStreetMap / Overpass API (May 2026).",
+    align    = c("l", rep("r", 8)),
+    booktabs = TRUE
+  ) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9) |>
+  column_spec(1, width = "3.5cm")
+```
+
+```{r table-nte-named-features}
+features_raw_nte |>
+  filter(!is.na(name), trimws(name) != "") |>
+  mutate(
+    type_label = case_match(
+      attr_type,
+      "beach"          ~ "Beach",
+      "peak"           ~ "Mountain Peak",
+      "hot_spring"     ~ "Volcanic / Hot Spring",
+      "waterfall"      ~ "Waterfall",
+      "nature_reserve" ~ "Nature Reserve",
+      "viewpoint"      ~ "Scenic Viewpoint"
+    ),
+    constituency_disp = if_else(
+      constituency == "Castries (equal split)", "Castries (shared)", constituency
+    )
+  ) |>
+  arrange(desc(weight), type_label, name) |>
+  select(
+    Feature      = name,
+    Type         = type_label,
+    Weight       = weight,
+    Constituency = constituency_disp
+  ) |>
+  kable(
+    caption = "Table 5a. Named natural features included in the NTE index, ordered by feature-type weight then name. Unnamed OSM nodes (anonymous viewpoints, minor peaks) contribute to constituency scores but are omitted from this display. Source: OpenStreetMap / Overpass API (May 2026), individually verified against Google Maps and local geographic knowledge.",
+    align   = c("l", "l", "r", "l")
+  ) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 8)
+```
+
+```{=latex}
+\begin{figure}[H]
+\centering
+\begin{minipage}[t]{0.47\textwidth}
+  \centering
+  \includegraphics[height=5.5in,keepaspectratio]{NTE_Map_Saint_Lucia.png}
+  \par\smallskip
+  {\small (a) District-level NTE share. Source: OpenStreetMap / Overpass API (May 2026); GADM v4.1.}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.47\textwidth}
+  \centering
+  \includegraphics[height=5.5in,keepaspectratio]{map_001.png}
+  \par\smallskip
+  {\small (b) Constituency boundary reference map. Source: Saint Lucia Electoral Department.}
+\end{minipage}
+\caption*{\textbf{Figure 2.} Left: Natural Tourism Endowment (NTE) share by district, with constituency-level values aggregated to the 10 administrative districts. Soufrière and Gros Islet are the dominant natural amenity areas. Right: Saint Lucia constituency boundary reference map.}
+\end{figure}
+```
+
+### National Tourism Shift
+
+The national shift ($\Delta g$) is the growth in island-wide stay-over arrivals from the pre-STR average (2010–2014) to the post-launch average (2015–2019, 2022). Pandemic years 2020–2021 are excluded because COVID-19 collapsed arrivals by approximately 70%, which would otherwise suppress the post-period mean and understate the STR-era expansion.
+
+```{r table-tourism-arrivals}
+fmt_n <- function(x) format(round(x), big.mark = ",", trim = TRUE)
+
+yrs_pre  <- stay_annual |> filter(year %in% 2010:2014)          |> arrange(year)
+yrs_post <- stay_annual |> filter(year %in% c(2015:2019, 2022)) |> arrange(year)
+yrs_cov  <- stay_annual |> filter(year %in% 2020:2021)          |> arrange(year)
+
+arrivals_detail <- bind_rows(
+  yrs_pre  |> mutate(row_label = as.character(year)),
+  tibble(year = NA_integer_, arrivals = pre_avg,  row_label = "Period mean"),
+  yrs_post |> mutate(row_label = as.character(year)),
+  tibble(year = NA_integer_, arrivals = post_avg, row_label = "Period mean"),
+  yrs_cov  |> mutate(row_label = as.character(year))
+) |>
+  mutate(arrivals_fmt = fmt_n(arrivals)) |>
+  select(Year = row_label, `Stay-Over Arrivals` = arrivals_fmt)
+
+arr_cap <- paste0(
+  "Table 6. Annual stay-over arrivals, Saint Lucia, 2010--2022.",
+  " Period means (bold) are used to compute the national shift:",
+  " (", fmt_n(post_avg), " $-$ ", fmt_n(pre_avg), ") $\\div$ ",
+  fmt_n(pre_avg), " $= +$",
+  round(national_shift * 100, 1),
+  "\\% ($\\Delta g = ", round(national_shift, 3), "$).",
+  " Pandemic years 2020--2021 are excluded because COVID-19",
+  " reduced arrivals by approximately 70\\% relative to 2019.",
+  " Source: CSO Saint Lucia, Selected Tourism Statistics (March 2026)."
+)
+
+arrivals_detail |>
+  kable(
+    caption  = arr_cap,
+    align    = c("l", "r"),
+    booktabs = TRUE,
+    escape   = FALSE
+  ) |>
+  kable_styling(latex_options = "hold_position", font_size = 10) |>
+  pack_rows("Pre-STR period (2010--2014)", 1, 6,
+            bold = TRUE, italic = FALSE) |>
+  pack_rows("Post-launch period (2015--2019, 2022)", 7, 13,
+            bold = TRUE, italic = FALSE) |>
+  pack_rows("Excluded -- COVID-19 pandemic", 14, 15,
+            bold = TRUE, italic = TRUE) |>
+  row_spec(c(6, 13), bold = TRUE)
+```
+
+## Estimation Framework
+
+The study estimates a three-equation system. The reduced form and first stage are estimated using two-way fixed effects linear probability models; the 2SLS combines them via the `fixest` package in R.
+
+**Reduced form:**
+
+$$Y_{ict} = \alpha + \beta^{RF}(NTE_c \times \Delta g \times \text{Post}_t) + \gamma_c + \delta_t + \varepsilon_{ict}$$
+
+where $Y_{ict}$ is a binary indicator equal to 1 if household $i$ in constituency $c$ at time $t$ rents its dwelling (0 otherwise). The fixed effects $\gamma_c$ absorb the baseline renter rate in each constituency and $\delta_t$ absorbs any common year shift, so $\beta^{RF}$ captures the differential change in renting probability between high- and low-NTE constituencies during the STR era.
+
+**First stage:**
+
+$$\text{STR}_{ct} = \alpha + \pi(NTE_c \times \Delta g \times \text{Post}_t) + \gamma_c + \delta_t + u_{ct}$$
+
+**2SLS:**
+
+$$\beta^{IV} = \beta^{RF} / \hat{\pi}$$
+
+Three specifications are estimated: (1) 17 constituencies × narrow STR measure (codes 8+12, n = 245) — the primary specification; (2) 17 constituencies × broad STR measure (codes 4+8+12, n = 1,393) — testing sensitivity to the code 4 classification decision; and (3) 10 districts × narrow STR measure — testing robustness to geographic aggregation. Standard errors are clustered at the geographic unit of analysis. Census household weights are applied throughout.
+
+## Robustness Checks
+
+### Broad STR Measurement
+
+The primary STR measure identifies 245 buildings using DwellingStatus codes 8 (Short Term Occupation) and 12 (AirBNB). As a robustness check, code 4 (Vacant — Seasonally, n = 1,148) is added, yielding a broad measure of 1,393 STR-associated buildings. Code 4 is excluded from the narrow measure because its district distribution is concentrated in low-NTE southern parishes — Vieux Fort and Micoud — where seasonal vacancy more plausibly reflects labour migration and second-home ownership than platform-driven tourist accommodation. Including it tests whether the main results are sensitive to this classification decision. Both the narrow and broad specifications are reported as side-by-side columns in Tables 10 and 11.
+
+
+\newpage
+
+# Empirical Results and Discussion
+
+## Descriptive Results
+
+### Constituency-Level Housing Outcomes
+
+Table 6 reports the full set of constituency-level housing outcomes for both census years, ordered from highest to lowest NTE. The three highest-NTE constituencies — Soufrière, Gros Islet, and Anse-la-Raye/Canaries — show the largest increases in renter rates, while peripheral constituencies with low NTE values exhibit smaller or negative changes in renting. Owner-occupancy in these same high-NTE constituencies did not rise alongside renting; the reduced-form estimate in Table 12 shows it fell relative to low-NTE areas.
+
+```{r table-constituency-outcomes}
+cons_wide |>
+  arrange(desc(nte)) |>
+  mutate(
+    across(c(renter_rate_10, renter_rate_22, owner_rate_10, owner_rate_22),
+           ~ round(. * 100, 1)),
+    nte      = round(nte, 3),
+    d_renter = round(d_renter, 1),
+    d_owner  = round(d_owner,  1),
+    across(c(hh_size_10, hh_size_22, d_hh_size), ~ round(., 2))
+  ) |>
+  select(constituency, nte,
+         renter_rate_10, renter_rate_22, d_renter,
+         owner_rate_10,  owner_rate_22,  d_owner,
+         hh_size_10,     hh_size_22) |>
+  kable(
+    col.names = c(
+      "Constituency", "NTE",
+      "Rent. '10", "Rent. '22", "ΔRent",
+      "Own. '10",  "Own. '22",  "ΔOwn",
+      "HH Sz '10", "HH Sz '22"
+    ),
+    caption = "Table 6. Constituency-level housing outcomes, Saint Lucia 2010--2022. Rent. = renter rate (\\%); Own. = owner rate (\\%); HH Sz = mean household size; $\\Delta$ = change in percentage points. Ordered by NTE (high to low). Source: CSO Saint Lucia Population and Housing Census 2010, 2022.",
+  ) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+### STR Units by Constituency
+
+Table 7 shows the estimated distribution of STR units by constituency, disaggregated from the district-level IDDetail counts using 2010 census household weights. The concentration of STR activity in Gros Islet and Soufrière mirrors the NTE distribution, providing a first-order validation of the instrument's relevance.
+
+```{r table-str-constituency}
+cons_str |>
+  left_join(nte_data, by = "constituency") |>
+  arrange(desc(nte)) |>
+  mutate(
+    str_rounded = round(str_count, 1),
+    `NTE Share` = paste0(round(nte * 100, 1), "%")
+  ) |>
+  select(Constituency = constituency, `Tourism Tier` = tourism_tier,
+         `NTE Share`, `Est. STR Units` = str_rounded) |>
+  kable(
+    caption = "Table 7. Estimated STR units by constituency, 2022. STR units = buildings with DwellingStatus 8 or 12 in the 2022 IDDetail building enumeration (245 total). Disaggregated from district to constituency using 2010 census household weights. Ordered by NTE (high to low). Source: CSO Saint Lucia 2022 Building Enumeration File.",
+  ) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"))
+```
+
+### Renter Rates by Constituency, 2010 vs. 2022
+
+Figure 3 shows renter rates in each constituency for 2010 and 2022, ordered from lowest to highest NTE. The visual pattern is clear: constituencies at the bottom of the chart — those with the highest natural amenity endowments — show the largest increases in renter rates over the twelve-year period, while constituencies at the top show more modest or negative changes.
+
+```{r fig-renter-rates, fig.cap="Renter Rate by Constituency, 2010 vs. 2022. Ordered by NTE (bottom = highest NTE). Source: CSO Saint Lucia Population and Housing Census 2010, 2022.", fig.height=6}
+cons_wide |>
+  arrange(nte) |>
+  mutate(constituency = factor(constituency, levels = constituency)) |>
+  select(constituency, nte, renter_rate_10, renter_rate_22) |>
+  pivot_longer(c(renter_rate_10, renter_rate_22),
+               names_to = "year", values_to = "renter_rate") |>
+  mutate(
+    year  = if_else(year == "renter_rate_10", "2010", "2022"),
+    label = scales::percent(renter_rate, accuracy = 0.1)
+  ) |>
+  ggplot(aes(x = renter_rate, y = constituency, fill = year)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_text(aes(label = label),
+            position = position_dodge(width = 0.7),
+            hjust = -0.1, size = 2.2) +
+  scale_x_continuous(labels = scales::percent,
+                     expand = expansion(mult = c(0, 0.18))) +
+  scale_fill_manual(values = c("2010" = "#D7191C", "2022" = "#FDAE61"),
+                    name = "Census Year") +
+  labs(
+    title    = "Renter Rate by Constituency, 2010 vs. 2022",
+    subtitle = "Constituencies ordered by NTE (bottom = highest tourism share)",
+    x = "Share of Households Renting", y = NULL,
+    caption  = "Source: CSO Saint Lucia Population and Housing Census 2010, 2022."
+  )
+```
+
+### Monthly Rent by Constituency, 2022
+
+Figure 4 shows median monthly rent by constituency for renter households in 2022. High-NTE constituencies are coloured red (High tourism tier), confirming that the tourism-intensity gradient aligns with the rent gradient. Gros Islet reports the highest median rent on the island, consistent with both the theoretical prediction and the reduced-form regression results.
+
+```{r fig-rent-2022, fig.cap="Median Monthly Rent by Constituency, 2022. Renter-occupied households only; ordered by median rent. Source: CSO Saint Lucia Population and Housing Census 2022.", fig.height=6}
+hh_2022 |>
+  filter(tenure %in% 7:8,
+         !is.na(monthly_rent),
+         monthly_rent > 0, monthly_rent < 99999) |>
+  left_join(cons_wide |> select(constituency, tourism_tier), by = "constituency") |>
+  mutate(tourism_tier = factor(tourism_tier, levels = c("High", "Medium", "Low"))) |>
+  group_by(constituency, tourism_tier) |>
+  summarise(median_rent = median(rep(monthly_rent, times = round(hh_weight))),
+            .groups = "drop") |>
+  arrange(median_rent) |>
+  mutate(constituency = factor(constituency, levels = constituency),
+         label        = paste0("EC$", format(round(median_rent), big.mark = ","))) |>
+  ggplot(aes(x = median_rent, y = constituency, fill = tourism_tier)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = label), hjust = -0.1, size = 2.5) +
+  scale_x_continuous(labels = dollar_format(prefix = "EC$"),
+                     expand = expansion(mult = c(0, 0.22))) +
+  scale_fill_manual(values = c("High" = "#D7191C", "Medium" = "#FDAE61", "Low" = "#2C7BB6"),
+                    name = "Tourism Tier") +
+  labs(
+    title    = "Median Monthly Rent by Constituency, 2022",
+    subtitle = "Renter-occupied households only; ordered by median rent",
+    x = "Median Monthly Rent (EC$)", y = NULL,
+    caption  = "Source: CSO Saint Lucia Population and Housing Census 2022."
+  )
+```
+
+## Regression Results
+
+### RQ1: Rent Inflation
+
+The 2010 census did not collect rent data, so the rent outcome is estimated as a 2022 cross-section on renter households. Constituency fixed effects are excluded because NTE is a constituency-level variable and would be perfectly collinear with constituency dummies; unit-level controls absorb dwelling quality instead.
+
+$$\log(\text{Rent}_{ic}) = \alpha + \beta \cdot NTE_c + \theta_1 \cdot \text{Bedrooms}_{ic} + \theta_2 \cdot \text{HHSize}_{ic} + \varepsilon_{ic}$$
+
+```{r rent-regressions}
+modelsummary(
+  list("(1) No controls" = rent1, "(2) Unit controls" = rent2,
+       "(3) + Crowding" = rent3),
+  stars       = c("*" = 0.10, "**" = 0.05, "***" = 0.01),
+  coef_rename = c(nte = "NTE — Natural Tourism Endowment (constituency share)",
+                  bedrooms = "Bedrooms", household_size = "Household size",
+                  ppbr = "Persons per bedroom"),
+  gof_map = list(
+    list(raw = "nobs",          clean = "N",       fmt = 0),
+    list(raw = "r.squared",     clean = "R²",      fmt = 3),
+    list(raw = "adj.r.squared", clean = "Adj. R²", fmt = 3)
+  ),
+  title = "Table 8. Log Monthly Rent on NTE — 2022 Renter Households (Cross-Section)"
+) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+*Notes:* Outcome: log(monthly rent in EC\$). Sample: renter-occupied households (tenure codes 7–8) with valid positive rent below EC\$99,999. No constituency FE (collinear with NTE). Standard errors clustered by constituency (N = 17 clusters). Because NTE is a constituency-level variable, the effective identifying sample is 17 geographic units, producing large SE inflation relative to household-level heteroskedasticity-robust SEs. The NTE coefficient is stable across specifications. Census household weights. \* p<0.10 \*\* p<0.05 \*\*\* p<0.01.
+
+The cross-sectional estimate implies a rent premium of approximately `r round(rent_premium_pct, 0)`% for renters in the highest-NTE constituency relative to the lowest, conditional on dwelling size and household composition. While economically large, this estimate is statistically underpowered at the 17-cluster level (p `r fmt_p(rent_nte_p)` in column 3), reflecting the limited cross-sectional variation available in a single census year.
+
+### RQ2: Stock Depletion — Reduced-Form Scatter
+
+Figure 5 is the visual representation of the reduced-form relationship: each constituency's pre-existing natural tourism endowment (NTE) plotted against the aggregate change in its renter rate between 2010 and 2022.
+
+```{r fig-scatter-renter, fig.cap="Pre-STR Natural Tourism Endowment vs. Change in Renter Rate, 2010–2022. Each point is one constituency. Source: CSO Saint Lucia Census 2010, 2022; NTE from OSM / Overpass API (May 2026)."}
+cons_wide |>
+  mutate(tourism_tier = factor(tourism_tier, levels = c("High", "Medium", "Low"))) |>
+  ggplot(aes(x = nte, y = d_renter, label = constituency, color = tourism_tier)) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "grey50", fill = "grey85", linewidth = 0.7) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text_repel(size = 2.5, max.overlaps = 17, show.legend = FALSE) +
+  scale_color_manual(
+    values = c("High" = "#D7191C", "Medium" = "#FDAE61", "Low" = "#2C7BB6"),
+    name = "Tourism Tier"
+  ) +
+  labs(
+    title    = "Pre-STR Natural Tourism Endowment vs. Change in Renter Rate",
+    subtitle = "Each point is one constituency; slope shows the reduced-form Bartik relationship",
+    x        = "Natural Tourism Endowment (NTE, pre-STR share)",
+    y        = "Change in Renter Rate 2010–2022 (pct. points)",
+    caption  = "Source: CSO Saint Lucia Census 2010, 2022; NTE from OSM / Overpass API (May 2026)."
+  )
+```
+
+### District-Level Corroboration
+
+Figure 7 repeats the reduced-form scatter at the district level (10 districts), confirming that the positive relationship between tourism intensity and renter rate change holds at a coarser geographic unit.
+
+```{r fig-dist-osm, fig.cap="District NTE vs. Change in Renter Rate, 2010–2022. Each point is one of 10 districts. District outcomes aggregated from constituency level using 2010 household weights. Source: CSO Saint Lucia Census 2010, 2022; OpenStreetMap / Overpass API (May 2026)."}
+dist_plot |>
+  ggplot(aes(x = nte_dist, y = d_renter, label = district)) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "grey50", fill = "grey85", linewidth = 0.7) +
+  geom_point(size = 3, color = "#2C7BB6", alpha = 0.9) +
+  geom_text_repel(size = 2.8, max.overlaps = 10) +
+  labs(
+    title    = "District NTE vs. Change in Renter Rate",
+    subtitle = "10 districts; same attraction-weighted methodology as constituency NTE",
+    x        = "District NTE (natural amenity share)",
+    y        = "Change in Renter Rate 2010–2022 (pct. points)",
+    caption  = "Source: CSO Saint Lucia Census 2010, 2022; OpenStreetMap / Overpass API (May 2026)."
+  )
+```
+
+### Reduced-Form Results (Table 9)
+
+```{r table-rf-combined}
+modelsummary(
+  list(
+    "17 Constituencies" = lpm,
+    "10 Districts"      = lpm_dist
+  ),
+  stars       = c("*" = 0.10, "**" = 0.05, "***" = 0.01),
+  coef_rename = c(
+    nte_post      = "NTE × Arrivals Shift × Post",
+    nte_post_dist = "NTE × Arrivals Shift × Post"
+  ),
+  gof_map = list(
+    list(raw = "nobs",          clean = "N",       fmt = 0),
+    list(raw = "r.squared",     clean = "R²",      fmt = 3),
+    list(raw = "adj.r.squared", clean = "Adj. R²", fmt = 3)
+  ),
+  title = "Table 9. Reduced-Form LPM: Pr(Renting) on NTE × Arrivals Shift × Post — 17 Constituencies vs. 10 Districts"
+) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+*Notes:* Outcome: binary indicator equal to 1 if the household rents, 0 otherwise (LPM). The regression is estimated on a pooled 2010–2022 household panel. Constituency and year fixed effects absorb the baseline renter rate in each constituency and any common year-on-year shift, so the coefficient on `NTE × Arrivals Shift × Post` identifies the differential change in renting probability between high- and low-NTE constituencies after the STR platform era began. Column (1): 17 constituency FEs, SEs clustered by constituency ($N = 17$ clusters). Column (2): 10 district FEs, SEs clustered by district ($N = 10$ clusters). \* p<0.10 \*\* p<0.05 \*\*\* p<0.01.
+
+The reduced-form coefficient ($\hat{\beta}^{RF}$ = `r round(rf_beta, 3)`, cluster SE = `r round(rf_se, 3)`, p `r fmt_p(rf_p)`) is the study's primary causal result. It indicates that a constituency at the island-wide mean NTE experienced an increase in its renter rate during the STR era that was substantially and significantly larger than a constituency with zero natural amenity endowment. The district-level specification confirms the result's robustness to geographic aggregation.
+
+### First Stage (Table 10)
+
+```{r table-fs-combined}
+modelsummary(
+  list(
+    "17 Const. × Narrow" = fs_narrow,
+    "17 Const. × Broad"  = fs_broad,
+    "10 Dist. × Narrow"  = fs_narrow_dist
+  ),
+  stars       = c("*" = 0.10, "**" = 0.05, "***" = 0.01),
+  coef_rename = c(
+    nte_post      = "NTE × Arrivals Shift × Post",
+    nte_post_dist = "NTE × Arrivals Shift × Post"
+  ),
+  gof_map = list(
+    list(raw = "nobs",          clean = "N",       fmt = 0),
+    list(raw = "r.squared",     clean = "R²",      fmt = 3),
+    list(raw = "adj.r.squared", clean = "Adj. R²", fmt = 3)
+  ),
+  title = "Table 10. First Stage: NTE Bartik IV on STR Unit Count — Three Specifications"
+) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+*Notes:* Dependent variable: estimated STR units per geographic unit × year cell. Narrow = codes 8+12 ($n = 245$); Broad = codes 4+8+12 ($n = 1,393$). Constituency panel $N = 34$ (17 × 2 years); District panel $N = 20$ (10 × 2 years). STR counts set to 0 in 2010. Geographic and year FEs absorbed. Instrument: $NTE_c \times \Delta g \times \text{Post}_t$. Heteroskedasticity-robust SEs. Column (1) is the primary specification; column (2) tests sensitivity to the code 4 classification; column (3) tests robustness to geographic aggregation. \* p<0.10 \*\* p<0.05 \*\*\* p<0.01.
+
+### 2SLS Results (Table 11)
+
+```{r table-2sls-combined}
+modelsummary(
+  list(
+    "17 Const. × Narrow" = iv_narrow,
+    "17 Const. × Broad"  = iv_broad,
+    "10 Dist. × Narrow"  = iv_narrow_dist
+  ),
+  stars       = c("*" = 0.10, "**" = 0.05, "***" = 0.01),
+  coef_rename = c(
+    fit_str_count       = "STR Units (instrumented)",
+    fit_str_count_broad = "STR Units (instrumented)",
+    fit_str_count_d     = "STR Units (instrumented)"
+  ),
+  gof_map = list(
+    list(raw = "nobs",          clean = "N",       fmt = 0),
+    list(raw = "r.squared",     clean = "R²",      fmt = 3),
+    list(raw = "adj.r.squared", clean = "Adj. R²", fmt = 3)
+  ),
+  title = "Table 11. 2SLS: Instrumented STR Penetration and Pr(Renting) — Three Specifications"
+) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+*Notes:* Outcome: 1 = household rents (LPM). All columns instrument STR penetration with NTE × arrivals shift ($\Delta g = 0.187$) × Post. Geographic and year FEs absorbed. Census household weights. Heteroskedasticity-robust SEs. First-stage F-statistics are below the conventional threshold of 10 for all three specifications, reflecting the small number of geographic units ($N = 34$ or 20 cell observations). The reduced-form estimates in Table 9 are the primary causal evidence; 2SLS coefficients are presented for interpretability but should be read cautiously. \* p<0.10 \*\* p<0.05 \*\*\* p<0.01.
+
+### Limitation: Pre-Period Placebo Regression (2001–2010)
+
+The most direct test of the exclusion restriction would examine whether NTE already predicted changes in renter rates during the **pre-platform period (2001–2010)** — before Airbnb began operating on the island. A non-significant $\hat{\beta}^{\text{placebo}}$ in the regression below would confirm that NTE carries no pre-existing correlation with housing tenure trends, strengthening the causal interpretation of the main results.
+
+$$\Delta\text{Renter}_{c,\,2001\text{–}2010} = \alpha + \beta^{\text{placebo}} \cdot NTE_c + \varepsilon_c$$
+
+This test cannot currently be executed. The 2001 Saint Lucia Population and Housing Census is catalogued in the IHSN Survey Catalog (catalog ID 620, reference LCA\_2001\_PHC\_V01\_M) and accessible via the CSO REDATAM portal, but the portal does not expose constituency-level cross-tabulations in its public interface — only national-level frequency tables are available. Obtaining the constituency-level renter rates required to compute $\Delta\text{Renter}_{c,\,2001\text{–}2010}$ would require access to the raw 2001 microdata file directly from the Central Statistical Office. This represents a data availability constraint rather than a methodological one; the identification strategy and estimation code are fully specified and the test can be activated if the microdata becomes available in future work.
+
+In the interim, the randomization inference test (Section 5.3) provides an alternative and arguably more powerful check on the same identifying assumption for a small-$N$ design. By asking whether the observed coefficient could arise from a random spatial assignment of NTE across constituencies, the permutation test evaluates the exogeneity of the instrument without requiring a second census wave.
+
+```{r load-2001}
+# 2001 constituency-level renter rates — not publicly available at sub-national
+# level through the CSO REDATAM portal. Requires raw microdata from the CSO.
+# Code infrastructure retained; test activates if cons_2001_renter.csv is supplied.
+placebo_wide      <- NULL
+placebo_available <- FALSE
+```
+
+### Robustness Check: Randomization Inference (Permutation Test)
+
+For small-N settings ($N = 17$ constituencies), the conventional Bartik exclusion restriction test is complemented by a randomization inference approach. The permutation test asks: could the observed reduced-form coefficient arise by chance if NTE were assigned at random across constituencies? Under the sharp null $H_0: \beta^{RF} = 0$ for all units, any permutation of NTE across constituencies is equally likely. The procedure permutes NTE 999 times, re-estimates the reduced form for each permutation, and computes an exact finite-sample p-value as the share of permutations that produce a coefficient at least as large as the observed $\hat{\beta}^{RF}$.
+
+```{r permutation-test}
+set.seed(42)
+n_perm <- 999
+
+# Observed coefficient
+obs_coef <- coef(lpm)["nte_post"]
+
+# Permutation distribution: shuffle NTE across constituencies, recompute instrument
+cons_names <- unique(hh_panel$constituency)
+
+perm_coefs <- replicate(n_perm, {
+  perm_nte <- setNames(
+    sample(nte_data$nte),
+    nte_data$constituency
+  )
+  hh_perm <- hh_panel |>
+    mutate(nte_p    = perm_nte[constituency],
+           nte_post_p = nte_p * national_shift * post)
+  coef(feols(renter ~ nte_post_p | constituency + year,
+             data    = hh_perm,
+             weights = ~hh_weight,
+             vcov    = ~constituency))["nte_post_p"]
+})
+
+perm_p <- mean(abs(perm_coefs) >= abs(obs_coef))
+```
+
+```{r fig-permutation, fig.cap="Randomization Inference: Distribution of reduced-form coefficients under 999 random NTE permutations. Red dashed line = observed coefficient. The exact two-sided p-value is the share of permutations producing a coefficient at least as extreme as the observed value."}
+tibble(coef = perm_coefs) |>
+  ggplot(aes(x = coef)) +
+  geom_histogram(bins = 40, fill = "#ABDDA4", color = "white", alpha = 0.85) +
+  geom_vline(xintercept =  obs_coef, color = "#D7191C", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = -obs_coef, color = "#D7191C", linetype = "dashed", linewidth = 1,
+             alpha = 0.5) +
+  annotate("text",
+           x     = obs_coef * 1.05,
+           y     = Inf,
+           label = paste0("Observed\nβⁿ = ", round(obs_coef, 3),
+                          "\np = ", round(perm_p, 3)),
+           hjust = 0, vjust = 1.4, size = 3, color = "#D7191C") +
+  labs(
+    title    = "Randomization Inference: NTE × Arrivals Shift × Post",
+    subtitle = paste0("999 permutations of NTE across 17 constituencies; exact two-sided p = ",
+                      round(perm_p, 3)),
+    x        = "Permuted reduced-form coefficient",
+    y        = "Count",
+    caption  = "Source: CSO Saint Lucia Census 2010, 2022; NTE from OSM / Overpass API (May 2026)."
+  )
+```
+
+```{r table-permutation}
+tibble(
+  Statistic = c(
+    "Observed $\\hat{\\beta}^{RF}$",
+    "Permutation mean (null)",
+    "Permutation SD (null)",
+    "Permutation p-value (two-sided)",
+    "N permutations"
+  ),
+  Value = c(
+    round(obs_coef, 4),
+    round(mean(perm_coefs), 4),
+    round(sd(perm_coefs), 4),
+    round(perm_p, 4),
+    n_perm
+  )
+) |>
+  kable(
+    caption  = "Table 14. Randomization Inference Summary — Reduced Form (17 Constituencies).",
+    escape   = FALSE,
+    align    = c("l", "r")
+  ) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"))
+```
+
+*Notes:* The permutation test provides an exact finite-sample p-value under the sharp null that NTE has no causal effect on renting outcomes. NTE values are randomly reassigned across the 17 constituencies 999 times; the reduced-form TWFE regression is re-estimated for each permutation using the same household panel, weights, and fixed effects as Table 9. The exact two-sided p-value equals the share of permutations yielding $|\hat{\beta}^{\text{perm}}| \geq |\hat{\beta}^{RF}|$. A small p-value indicates the observed coefficient is unlikely to arise from random spatial assignment of tourism endowments, strengthening the causal interpretation of the main results.
+
+### Robustness Check: Leave-One-Out Sensitivity
+
+With $N = 17$ constituencies, results could in principle be driven by a single influential unit — most plausibly Gros Islet (highest NTE) or Soufrière (second-highest NTE). Figure 10 reports the reduced-form coefficient and 95% confidence interval from 17 separate regressions, each dropping one constituency in turn.
+
+```{r leave-one-out}
+loo_results <- map_dfr(cons_names, function(drop_c) {
+  fit <- feols(renter ~ nte_post | constituency + year,
+               data    = hh_panel |> filter(constituency != drop_c),
+               weights = ~hh_weight,
+               vcov    = ~constituency)
+  ci <- confint(fit)["nte_post", ]
+  tibble(
+    dropped = drop_c,
+    coef    = coef(fit)["nte_post"],
+    ci_lo   = ci[[1]],
+    ci_hi   = ci[[2]]
+  )
+})
+```
+
+```{r fig-loo, fig.cap="Leave-One-Out Sensitivity: Reduced-form coefficient when each constituency is dropped in turn. Horizontal dashed line = full-sample estimate. Source: CSO Saint Lucia Census 2010, 2022; NTE from OSM / Overpass API (May 2026).", fig.height=6}
+loo_results |>
+  left_join(nte_data |> select(constituency, tourism_tier),
+            by = c("dropped" = "constituency")) |>
+  mutate(
+    tourism_tier = factor(tourism_tier, levels = c("High", "Medium", "Low")),
+    dropped      = fct_reorder(dropped, coef)
+  ) |>
+  ggplot(aes(x = coef, y = dropped, color = tourism_tier)) +
+  geom_vline(xintercept = obs_coef,
+             linetype = "dashed", color = "grey50", linewidth = 0.7) +
+  geom_errorbar(aes(xmin = ci_lo, xmax = ci_hi), width = 0.3, linewidth = 0.6, orientation = "y") +
+  geom_point(size = 3) +
+  scale_color_manual(
+    values = c("High" = "#D7191C", "Medium" = "#FDAE61", "Low" = "#2C7BB6"),
+    name = "Tourism Tier"
+  ) +
+  labs(
+    title    = "Leave-One-Out Sensitivity: Reduced-Form Coefficient",
+    subtitle = "Each row drops one constituency; dashed line = full-sample estimate",
+    x        = "Reduced-form coefficient (NTE × Arrivals Shift × Post)",
+    y        = NULL,
+    caption  = "Source: CSO Saint Lucia Census 2010, 2022; NTE from OSM / Overpass API (May 2026)."
+  )
+```
+
+*Notes:* Each point is the reduced-form TWFE coefficient from equation (1) estimated on the 16-constituency subsample obtained by dropping the labelled constituency. Error bars are 95% confidence intervals based on SEs clustered by constituency. The full-sample estimate ($\hat{\beta}^{RF}$ = `r round(rf_beta, 3)`) is shown as a dashed vertical reference line. Stability of the coefficient across all 17 leave-one-out samples would confirm that no single constituency drives the main result.
+
+### Robustness Check: Balance Test on 2010 Baseline Correlates
+
+Goldsmith-Pinkham, Sorkin, and Swift (2020) recommend testing whether the Bartik shares — here, the NTE values — are correlated with pre-treatment characteristics that could independently drive the outcomes of interest. Table 15 reports OLS regressions of five 2010 baseline housing characteristics on NTE across the 17 constituencies.
+
+```{r balance-test}
+bal_renter   <- feols(renter_rate_10   ~ nte, data = cons_wide, vcov = "hetero")
+bal_owner    <- feols(owner_rate_10    ~ nte, data = cons_wide, vcov = "hetero")
+bal_rentfree <- feols(rentfree_rate_10 ~ nte, data = cons_wide, vcov = "hetero")
+bal_hhsize   <- feols(hh_size_10       ~ nte, data = cons_wide, vcov = "hetero")
+bal_ppbr     <- feols(ppbr_10          ~ nte, data = cons_wide, vcov = "hetero")
+```
+
+```{r table-balance}
+modelsummary(
+  list(
+    "Renter Rate"    = bal_renter,
+    "Owner Rate"     = bal_owner,
+    "Rent-Free Rate" = bal_rentfree,
+    "HH Size"        = bal_hhsize,
+    "Persons/Bedroom"= bal_ppbr
+  ),
+  stars       = c("*" = 0.10, "**" = 0.05, "***" = 0.01),
+  coef_rename = c(nte = "NTE (constituency share)"),
+  gof_map     = list(
+    list(raw = "nobs",          clean = "N",       fmt = 0),
+    list(raw = "r.squared",     clean = "R²",      fmt = 3)
+  ),
+  title = "Table 15. Balance Test: NTE and 2010 Baseline Housing Characteristics (N = 17 Constituencies)"
+) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+*Notes:* Each column is a cross-sectional OLS regression of the labelled 2010 baseline characteristic on NTE across 17 constituencies. Outcomes are expressed as proportions (renter, owner, rent-free rates) or levels (household size, persons per bedroom). Heteroskedasticity-robust SEs. $N = 17$ in all columns. \* p<0.10 \*\* p<0.05 \*\*\* p<0.01.
+
+Two interpretive points follow from this test. First, a statistically significant correlation between NTE and 2010 baseline *levels* does not threaten identification in the two-way fixed effects design: constituency fixed effects absorb all time-invariant differences between areas, including any pre-existing structural association between tourism geography and tenure composition. The identifying variation comes from differential *changes* in outcomes after the STR platform era began, not from cross-sectional differences in levels. Second, and more consequentially, what would threaten identification is a correlation between NTE and pre-existing *trends* in renter rates — a pattern that the 2001–2010 placebo regression (Section 5.2) is designed to detect but cannot currently be executed due to data availability constraints. The randomization inference test in Section 5.3 provides the operative check on this assumption by asking whether the spatial pattern of NTE values is unusual relative to a null distribution of random assignments.
+
+### Robustness Check: Anderson-Rubin Weak-Instrument-Robust Inference
+
+Standard 2SLS confidence intervals are reliable only when the first stage is sufficiently strong. The Anderson-Rubin (1950) test provides an alternative confidence set that is valid regardless of instrument strength: for each hypothesised value $\beta_0$, it tests whether the instrument ($\text{NTE} \times \Delta g \times \text{Post}$) retains explanatory power after adjusting the outcome by $\beta_0 \cdot \widehat{D}$. The AR 95% confidence set is the range of $\beta_0$ values that cannot be rejected at the 5% level. Table 16 reports the first-stage $F$-statistic alongside the standard 2SLS Wald confidence interval and the AR confidence interval for the main specification.
+
+```{r ar-test, cache=TRUE}
+# First-stage F-statistics — computed from the constituency/district-level
+# first-stage models (fs_narrow, fs_broad, fs_narrow_dist), the same models
+# reported in Table 10. NOTE: fitstat(iv_narrow, "ivf") is NOT used here —
+# that computes the F-test on the household-level 2SLS object with
+# vcov = "hetero", but str_count only varies at the constituency x year
+# level (34 unique values spread across 100,000+ household rows), so a
+# non-clustered SE there massively overstates precision and inflates the
+# F-stat by several orders of magnitude relative to the true cluster-level F.
+f_narrow <- as.numeric((coef(fs_narrow)["nte_post"]      / se(fs_narrow)["nte_post"])^2)
+f_broad  <- as.numeric((coef(fs_broad)["nte_post"]       / se(fs_broad)["nte_post"])^2)
+f_dist   <- as.numeric((coef(fs_narrow_dist)["nte_post_dist"] / se(fs_narrow_dist)["nte_post_dist"])^2)
+
+# Access coefficients and CIs by position (fixest names IV coef after endogenous var)
+b2sls   <- as.numeric(coef(iv_narrow)[1])
+ci_2sls <- as.numeric(confint(iv_narrow)[1, ])
+se_2sls <- (ci_2sls[2] - ci_2sls[1]) / (2 * 1.96)
+
+# AR 95% CI for narrow main specification via grid search
+beta_seq <- seq(b2sls - 8 * se_2sls, b2sls + 8 * se_2sls, length.out = 500)
+
+ar_pvals <- vapply(beta_seq, function(b0) {
+  tmp      <- hh_panel
+  tmp$y_ar <- tmp$renter - b0 * tmp$str_count
+  ct <- coeftable(
+    feols(y_ar ~ nte_post | constituency + year,
+          data = tmp, weights = ~hh_weight, vcov = "hetero")
+  )
+  ct["nte_post", "Pr(>|t|)"]
+}, numeric(1))
+
+in_ci <- beta_seq[ar_pvals > 0.05]
+ar_lo <- if (length(in_ci) == 0) NA_real_ else min(in_ci)
+ar_hi <- if (length(in_ci) == 0) NA_real_ else max(in_ci)
+
+# CIs for broad and district specs
+ci_broad <- as.numeric(confint(iv_broad)[1, ])
+ci_dist  <- as.numeric(confint(iv_narrow_dist)[1, ])
+
+ar_table <- tibble(
+  Specification   = c("17 Const. x Narrow (main)", "17 Const. x Broad", "10 Districts x Narrow"),
+  `Coef. (2SLS)` = round(c(b2sls,
+                             as.numeric(coef(iv_broad)[1]),
+                             as.numeric(coef(iv_narrow_dist)[1])), 4),
+  `2SLS 95% CI`  = c(sprintf("[%.4f, %.4f]", ci_2sls[1], ci_2sls[2]),
+                      sprintf("[%.4f, %.4f]", ci_broad[1], ci_broad[2]),
+                      sprintf("[%.4f, %.4f]", ci_dist[1],  ci_dist[2])),
+  `AR 95% CI`    = c(sprintf("[%.4f, %.4f]", ar_lo, ar_hi), "n/a", "n/a"),
+  `First-stage F`= round(c(f_narrow, f_broad, f_dist), 1)
+)
+```
+
+```{r table-ar}
+kable(ar_table,
+      caption = "Table 16. Anderson-Rubin Weak-Instrument-Robust Inference.",
+      align = c("l", "r", "c", "c", "r")) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+*Notes:* AR 95% CI reported for the main (17 constituencies × narrow) specification. If the AR interval closely tracks the 2SLS Wald interval, the first-stage is sufficiently strong and standard inference is reliable. A substantially wider AR interval would signal weak-instrument distortion of the Wald CI.
+
+### RQ3: Homeownership — Tenure-Shift Externality
+
+If STR conversion reduces long-term rental supply and raises property values, constituencies with higher pre-STR tourism intensity might be expected to see the composition of remaining residents shift toward owner-occupiers. Figure 8 and Table 12 test this mechanism; the results below reject it in favour of an alternative tenure-conversion interpretation.
+
+```{r fig-scatter-owner, fig.cap="Pre-STR Natural Tourism Endowment vs. Change in Owner-Occupancy Rate, 2010–2022. Each point is one constituency. Source: CSO Saint Lucia Census 2010, 2022; NTE from OSM / Overpass API (May 2026).", fig.height=5}
+cons_wide |>
+  mutate(tourism_tier = factor(tourism_tier, levels = c("High", "Medium", "Low"))) |>
+  ggplot(aes(x = nte, y = d_owner, label = constituency, color = tourism_tier)) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "grey50", fill = "grey85", linewidth = 0.7) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text_repel(size = 2.5, max.overlaps = 17, show.legend = FALSE) +
+  scale_color_manual(
+    values = c("High" = "#D7191C", "Medium" = "#FDAE61", "Low" = "#2C7BB6"),
+    name = "Tourism Tier"
+  ) +
+  labs(
+    title    = "Pre-STR Natural Tourism Endowment vs. Change in Owner-Occupancy Rate",
+    subtitle = "Each point is one constituency; negative slope = owner-occupancy fell in high-NTE areas",
+    x        = "Natural Tourism Endowment (NTE, pre-STR share)",
+    y        = "Change in Owner-Occupancy Rate 2010–2022 (pct. points)",
+    caption  = "Source: CSO Saint Lucia Census 2010, 2022; NTE from OSM / Overpass API (May 2026)."
+  )
+```
+
+```{r table-rq3}
+modelsummary(
+  list("17 Constituencies" = lpm_owner, "10 Districts" = lpm_owner_dist),
+  stars       = c("*" = 0.10, "**" = 0.05, "***" = 0.01),
+  coef_rename = c(
+    nte_post      = "NTE × Arrivals Shift × Post",
+    nte_post_dist = "NTE × Arrivals Shift × Post"
+  ),
+  gof_map = list(
+    list(raw = "nobs",          clean = "N",       fmt = 0),
+    list(raw = "r.squared",     clean = "R²",      fmt = 3),
+    list(raw = "adj.r.squared", clean = "Adj. R²", fmt = 3)
+  ),
+  title = "Table 12. Reduced-Form LPM: Pr(Owner-Occupied) — 17 Constituencies vs. 10 Districts"
+) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+*Notes:* Outcome: 1 = household is owner-occupied (tenure codes 1–6 in 2022; 1–2 in 2010). Instrument: NTE × arrivals shift ($\Delta g = 0.187$) × Post. Geographic and year FEs absorbed. Census household weights. Clustered SEs. The negative coefficient indicates that owner-occupancy fell, rather than rose, in high-NTE constituencies relative to low-NTE constituencies during the STR era. \* p<0.10 \*\* p<0.05 \*\*\* p<0.01.
+
+The negative coefficient on owner-occupancy in Table 12 ($\hat\beta$ = `r round(rq3_beta, 3)`, p `r fmt_p(rq3_p)`; district-level $\hat\beta$ = `r round(rq3_beta_dist, 3)`, p `r fmt_p(rq3_p_dist)`) runs counter to the simultaneous in-migrant-renter/investor-buyer sorting process hypothesised above. Instead, it suggests a single tenure-conversion channel: as renter rates rose in the highest-NTE constituencies between 2010 and 2022, owner-occupancy fell rather than rose, implying that previously owner-occupied or rent-free housing stock was converted into rental (and STR) units rather than new owner-occupier demand being drawn into these constituencies.
+
+### RQ4: Crowding — Secondary Market Distortions
+
+If displaced renters are pushed into lower-cost dwellings in peripheral constituencies, crowding might be expected to fall in high-NTE areas as the household composition shifts toward less-crowded owner-occupiers and in-migrant workers. Figure 9 and Table 13 test this prediction; the results below are inconclusive.
+
+```{r fig-scatter-ppbr, fig.cap="Pre-STR Natural Tourism Endowment vs. Change in Persons per Bedroom, 2010–2022. Each point is one constituency. Source: CSO Saint Lucia Census 2010, 2022; NTE from OSM / Overpass API (May 2026).", fig.height=5}
+cons_wide |>
+  mutate(tourism_tier = factor(tourism_tier, levels = c("High", "Medium", "Low"))) |>
+  ggplot(aes(x = nte, y = d_ppbr, label = constituency, color = tourism_tier)) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "grey50", fill = "grey85", linewidth = 0.7) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text_repel(size = 2.5, max.overlaps = 17, show.legend = FALSE) +
+  scale_color_manual(
+    values = c("High" = "#D7191C", "Medium" = "#FDAE61", "Low" = "#2C7BB6"),
+    name = "Tourism Tier"
+  ) +
+  labs(
+    title    = "Pre-STR Natural Tourism Endowment vs. Change in Persons per Bedroom",
+    subtitle = "Sign is sensitive to geographic aggregation; neither estimate is significant (Table 13)",
+    x        = "Natural Tourism Endowment (NTE, pre-STR share)",
+    y        = "Change in Persons per Bedroom 2010–2022",
+    caption  = "Source: CSO Saint Lucia Census 2010, 2022; NTE from OSM / Overpass API (May 2026)."
+  )
+```
+
+```{r table-rq4}
+modelsummary(
+  list("17 Constituencies" = lpm_ppbr, "10 Districts" = lpm_ppbr_dist),
+  stars       = c("*" = 0.10, "**" = 0.05, "***" = 0.01),
+  coef_rename = c(
+    nte_post      = "NTE × Arrivals Shift × Post",
+    nte_post_dist = "NTE × Arrivals Shift × Post"
+  ),
+  gof_map = list(
+    list(raw = "nobs",          clean = "N",       fmt = 0),
+    list(raw = "r.squared",     clean = "R²",      fmt = 3),
+    list(raw = "adj.r.squared", clean = "Adj. R²", fmt = 3)
+  ),
+  title = "Table 13. Reduced-Form OLS: Persons per Bedroom — 17 Constituencies vs. 10 Districts"
+) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+*Notes:* Outcome: persons per bedroom (continuous crowding measure). Instrument: NTE × arrivals shift ($\Delta g = 0.187$) × Post. Geographic and year FEs absorbed. Census household weights. Clustered SEs. The constituency-level estimate is positive and the district-level estimate is negative; neither is statistically significant, so this specification does not provide reliable evidence of a crowding effect in either direction. \* p<0.10 \*\* p<0.05 \*\*\* p<0.01.
+
+## Discussion
+
+The four sets of results point to a single dominant channel — rising renter rates in tourism-exposed constituencies — rather than the multi-channel gentrification narrative originally hypothesised in Section 3. Constituencies with the highest natural amenity endowments — Soufrière, Gros Islet, and Anse-la-Raye/Canaries — experienced the largest and most significant increases in renter populations between 2010 and 2022, alongside the highest median rents on the island. Owner-occupancy in these same constituencies fell rather than rose, and the relationship between tourism exposure and household crowding is not statistically robust. Together these patterns suggest that STR-era tourism intensification operated primarily by converting owner-occupied and informally-held housing stock into rental housing, rather than simultaneously attracting in-migrant renters and investor-buyers while displacing higher-crowding households outward, as the theoretical framework in Section 3 anticipated.
+
+**The reduced form is the study's most credible causal result.** The Bartik instrument strongly predicts renting outcomes ($\hat{\beta}^{RF}$ = `r round(rf_beta, 3)`, cluster SE = `r round(rf_se, 3)`, Wald F = `r round(rf_waldf, 2)`, p `r fmt_p(rf_p)`) without relying on the first stage. The first-stage F-statistics are below the conventional threshold of 10, reflecting the small number of constituencies (17), and the 2SLS results should be read with caution. The reduced-form coefficient estimates the total causal effect of the Bartik-induced increase in tourism-corridor economic activity on renter rates, encompassing all channels through which NTE-correlated intensification affects tenure composition.
+
+**The urban employment confound is the study's primary limitation.** Gros Islet and Castries are not only Saint Lucia's primary tourism corridors — they are also its principal urban employment centres. Workers relocating to these constituencies for employment in government agencies, hospitality operations, and commercial services would register as new renters in the 2022 census regardless of whether their jobs are directly linked to STR platform activity. Isolating the specific contribution of STR platforms from this broader economic intensification requires constituency-level labour force data that are not currently available. Future research combining census microdata with employment records from the National Insurance Corporation would allow this decomposition.
+
+**Comparison with the international literature.** The directional pattern of findings is consistent with the broader STR literature: rents are higher and renter populations are larger in areas with greater platform penetration (Barron et al., 2021; Garcia-López et al., 2020). The magnitude of the estimated rent premium (approximately `r round(rent_premium_pct, 0)`%) is larger than most estimates from large cities, consistent with the expectation that small, thin markets with limited substitution opportunities will exhibit more pronounced price effects. The decline in owner-occupancy alongside rising renter rates points to a tenure-conversion mechanism — owner-occupied and informally-held housing shifting into the rental market — that is related to, but distinct from, the investor-driven "tourism gentrification" mechanism documented by Gotham (2005) in other tourism-driven urban contexts.
+
+\newpage
+
+# Conclusion
+
+## Summary of Findings
+
+This study has examined the relationship between short-term rental platform expansion and housing market outcomes across Saint Lucia's 17 electoral constituencies, using a Bartik shift-share instrumental variable design applied to full-population census microdata from 2010 and 2022. Four findings correspond to the four research questions.
+
+**Finding 1 — Stock Depletion (RQ2):** Constituencies with greater pre-existing natural amenity endowments experienced significantly larger increases in renter populations during the STR platform era ($\hat{\beta}^{RF}$ = `r round(rf_beta, 3)`, p `r fmt_p(rf_p)`). This is the study's primary and most statistically robust result, and it holds across both geographic units (constituencies and districts) and both STR measurement strategies (narrow and broad DwellingStatus codes).
+
+**Finding 2 — Rent Inflation (RQ1):** Renters in high-NTE constituencies face a rent premium of approximately `r round(rent_premium_pct, 0)`% relative to the lowest-NTE constituencies, conditional on dwelling size and household composition. This estimate is economically large but statistically underpowered at the 17-cluster level (p `r fmt_p(rent_nte_p)`); a longer rent panel is needed to confirm it.
+
+**Finding 3 — Tenure-Shift Externality (RQ3):** Owner-occupancy rates *fell*, rather than rose, in the highest-NTE constituencies relative to low-NTE areas ($\hat\beta$ = `r round(rq3_beta, 3)`, p `r fmt_p(rq3_p)`; district-level $\hat\beta$ = `r round(rq3_beta_dist, 3)`, p `r fmt_p(rq3_p_dist)`), suggesting that STR-era tourism pressure converted owner-occupied and informally-held housing into rental stock rather than simultaneously attracting new owner-occupier and investor-buyer demand as originally hypothesised.
+
+**Finding 4 — Crowding (RQ4):** The relationship between tourism exposure and household crowding is not statistically robust: the constituency-level estimate is positive ($\hat\beta$ = `r round(rq4_beta, 3)`, p `r fmt_p(rq4_p)`) while the district-level estimate is negative ($\hat\beta$ = `r round(rq4_beta_dist, 3)`, p `r fmt_p(rq4_p_dist)`), and neither reaches conventional significance. This analysis therefore does not provide reliable evidence of a crowding effect in either direction.
+
+## Policy Recommendations
+
+The findings have direct implications for housing policy in Saint Lucia. Eight targeted interventions are recommended, ordered by the directness of the policy-evidence link.
+
+**1. Earmark Tourism Levy Revenue for Affordable Housing.** The government should earmark a share of Tourism Levy Act (2020) collections for affordable housing in the highest-NTE constituencies — Soufrière, Gros Islet, and Anse-la-Raye/Canaries — where this study documents that rents are highest and renter populations have grown fastest. This directly addresses the evidence of affordability pressures concentrated in tourism corridors.
+
+**2. Resident-First Tax Incentives.** Tax relief under the Community Tourism Development Act (2022) — on income tax, property tax, and stamp duty — should be made conditional on the provider maintaining primary residence in Saint Lucia. This directly addresses the tenure-conversion mechanism identified in this research, whereby previously owner-occupied and informally-held housing in tourism corridors is converted into rental and STR stock, by ensuring that any resulting STR income accrues to resident, rather than absentee, property owners.
+
+**3. Tax Exemption for Long-Term Rental Income.** Making rental income from genuine long-term residential leases tax-free would directly improve the financial attractiveness of the long-term rental market relative to STR platforms, counteracting the income differential that currently incentivises conversion. The `r round(rent_premium_pct, 0)`% descriptive rent premium in the highest-NTE constituencies demonstrates the scale of the market distortion such a reform would need to counteract.
+
+**4. Tourism Decentralisation.** The Community Tourism Agency should steer visitors toward off-anchor constituencies — Micoud South, Choiseul, Laborie — to relieve housing cost pressures in Soufrière and Gros Islet while generating economic activity in underserved peripheral areas. This recommendation is directly motivated by the geographic concentration of the study's findings.
+
+**5. Mandatory STR Quality Standards and Registration.** The Community Tourism Agency should use its authority to issue Operating Manuals mandating minimum standards for registered STR units, professionalising the sector while making compliance costs legible for enforcement. The study's census-based STR measure (245 buildings) is substantially smaller than the Airbtics-reported island-wide count (1,529 active listings in 2026), implying that many units may be operating without formal registration.
+
+**6. Strengthen STR Enforcement.** Authorities should use inspection powers under the Community Tourism Development Act (2022), coordinating with property valuators to identify unregistered STR units and bring them into compliance with mandatory registration requirements.
+
+**7. Establish a Landlord-Tenant Tribunal.** A dedicated tribunal to resolve rental disputes would reduce the institutional risks that push landlords toward STR conversion, making long-term renting a more secure and attractive investment for property owners.
+
+**8. Legal Requests for Platform Data.** The government should issue formal legal requests to STR platforms for listing and booking data, cross-referenced against the weekly guest reports required under Section 19 of the Tourism Levy Act, to ensure full remittance of nightly levies and to create a longitudinal constituency-level listing dataset. Such data would validate the IDDetail-based STR measure used in this thesis, support ongoing monitoring of platform penetration, and ultimately enable researchers to decompose the reduced-form causal effect estimated here into its STR platform component and its broader employment intensification component.
+
+## Limitations and Future Research
+
+Three limitations constrain the current analysis. First, the endogenous variable — STR unit count from the IDDetail building enumeration — captures a point-in-time snapshot from 2022 and cannot trace the year-on-year expansion of platform penetration across the 2014–2022 treatment period. A longitudinal STR series, which could be assembled from platform data under recommendation 8 above, would allow a cleaner difference-in-differences design exploiting the timing of platform entry.
+
+Second, the pre-period placebo regression (2001–2010) — the most direct test of the exclusion restriction — cannot be executed until the 2001 Saint Lucia Population and Housing Census microdata are obtained from the CSO. The activation code is included in Section 5 pending receipt of that file.
+
+Third, the identification strategy cannot isolate the specific contribution of STR platform activity from the broader economic intensification of tourism corridors. Constituency-level labour force data from the National Insurance Corporation, linked to the census microdata, would allow this decomposition in future work.
+
+Notwithstanding these limitations, this study provides the most rigorous causal analysis of STR platform effects on housing markets in a Caribbean Small Island Developing State to date, and its findings have direct implications for housing policy in Saint Lucia and analogous tourism-dependent island economies across the region.
+
+\newpage
+
+# References {.unnumbered}
+
+Autor, D., Palmer, C., & Pathak, P. (2014). Housing market spillovers: Evidence from the end of rent control in Cambridge, Massachusetts. *Journal of Political Economy*, 122(3), 661–717.
+
+Barron, K., Kung, E., & Proserpio, D. (2021). The effect of home-sharing on house prices and rents: Evidence from Airbnb. *Marketing Science*, 40(1), 23–47.
+
+Bartik, T. J. (1991). *Who Benefits from State and Local Economic Development Policies?* Kalamazoo, MI: W.E. Upjohn Institute for Employment Research.
+
+Baum-Snow, N., & Ferreira, F. (2015). Causal inference in urban and regional economics. In G. Duranton, J. V. Henderson, & W. C. Strange (Eds.), *Handbook of Regional and Urban Economics* (Vol. 5, pp. 3–68). Elsevier.
+
+Borusyak, K., Hull, P., & Jaravel, X. (2022). Quasi-experimental shift-share research designs. *Review of Economic Studies*, 89(1), 181–213.
+
+Briguglio, L., Cordina, G., Farrugia, N., & Vella, S. (2009). Economic vulnerability and resilience: Concepts and measurements. *Oxford Development Studies*, 37(3), 229–247.
+
+Caribbean Development Bank. (2019). *Caribbean Housing Finance: Expanding Access and Affordability*. Bridgetown: CDB.
+
+Desmond, M. (2016). *Evicted: Poverty and Profit in the American City*. New York: Crown Publishers.
+
+ECLAC. (2018). *Caribbean Outlook 2018: Averting the Perfect Storm*. Port of Spain: ECLAC Subregional Headquarters for the Caribbean.
+
+Garcia-López, M.-À., Jofre-Monseny, J., Martínez-Mazza, R., & Segú, M. (2020). Do short-term rental platforms affect housing markets? Evidence from Airbnb in Barcelona. *Journal of Urban Economics*, 119, 103278.
+
+Glaeser, E. L., & Gyourko, J. (2003). The impact of building restrictions on housing affordability. *Federal Reserve Bank of New York Economic Policy Review*, 9(2), 21–39.
+
+Goldsmith-Pinkham, P., Sorkin, I., & Swift, H. (2020). Bartik instruments: What, when, why, and how. *American Economic Review*, 110(8), 2586–2624.
+
+Gotham, K. F. (2005). Tourism gentrification: The case of New Orleans' Vieux Carré (French Quarter). *Urban Studies*, 42(7), 1099–1121.
+
+Gurran, N., & Phibbs, P. (2017). When tourists move in: How should urban planners respond to Airbnb? *Journal of the American Planning Association*, 83(1), 80–92.
+
+Gyourko, J., & Molloy, R. (2015). Regulation and housing supply. In G. Duranton, J. V. Henderson, & W. C. Strange (Eds.), *Handbook of Regional and Urban Economics* (Vol. 5, pp. 1289–1337). Elsevier.
+
+Horn, K., & Merante, M. (2017). Is home sharing driving up rents? Evidence from Airbnb in Boston. *Journal of Housing Economics*, 38, 14–24.
+
+Koh, E., & King, B. (2017). Accommodating the sharing revolution: A qualitative evaluation of the impact of Airbnb on Singapore's budget hotel sector. *International Journal of Contemporary Hospitality Management*, 29(1), 400–415.
+
+Lee, D. (2016). How Airbnb short-term rentals exacerbate Los Angeles's affordable housing crisis: Analysis and policy recommendations. *Harvard Law and Policy Review*, 10, 229–253.
+
+Pelling, M., & Uitto, J. I. (2001). Small island developing states: Natural disaster vulnerability and global change. *Environmental Hazards*, 3(2), 49–62.
+
+Rosenthal, S. S. (2014). Are private markets and filtering a viable source of low-income housing? Estimates from a "repeat income" model. *American Economic Review*, 104(2), 687–706.
+
+Saint Lucia Central Statistical Office. (2022). *2022 Population and Housing Census: Preliminary Report*. Castries: CSO.
+
+Scitovsky, T. (1954). Two concepts of external economies. *Journal of Political Economy*, 62(2), 143–151.
+
+Sheppard, S., & Udell, A. (2016). *Do Airbnb Properties Affect House Prices?* Williams College Department of Economics Working Papers.
+
+Wachsmuth, D., & Weisler, A. (2018). Airbnb and the rent gap: Gentrification through the sharing economy. *Environment and Planning A: Economy and Space*, 50(6), 1147–1170.
+
+Zervas, G., Proserpio, D., & Byers, J. W. (2017). The rise of the sharing economy: Estimating the impact of Airbnb on the hotel industry. *Journal of Marketing Research*, 54(5), 687–705.

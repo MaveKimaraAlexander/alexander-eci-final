@@ -1,0 +1,416 @@
+---
+title: "Data Mining For Short Term Rentals Thesis"
+author: "Mave Kimara Alexander"
+format:
+  pdf:
+    pdf-engine: xelatex
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    documentclass: article
+    keep-tex: false
+geometry: margin=0.4in
+editor: visual
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+library(haven)
+library(tidyverse)
+library(labelled)
+```
+
+# Loading Data
+
+```{r}
+Raw_Census_Data <- read_sav("PersonHHoldMerge 2022 Annon.sav")
+```
+
+# Column Labels
+
+```{r}
+labels_table <- tibble(
+  variable_name = names(Raw_Census_Data),
+
+  SPSS_variable_label = sapply(Raw_Census_Data, function(x) {
+    lab <- labelled::var_label(x)
+    if (is.null(lab) || lab == "") NA_character_ else as.character(lab)
+  }),
+
+  SPSS_value_labels = sapply(Raw_Census_Data, function(x) {
+    vals <- labelled::val_labels(x)
+    if (length(vals) == 0) {
+      NA_character_
+    } else {
+      paste(names(vals), vals, collapse = "; ")
+    }
+  })
+)
+
+print(labels_table, n = Inf, width = Inf)
+```
+
+> **Note:** The codebook shows that `dwell_status` is a dwelling-level variable with categories including AirBNB. However, it is not available in the dataset — this will need to be confirmed with the statistics office.
+
+# Creating Working Table
+
+```{r}
+Thesis_Working_Data <- Raw_Census_Data |>
+  distinct(CompositeKey, .keep_all = TRUE) |>
+  select(
+    CompositeKey,
+    DISTRICT_ID,
+    CONSTITUENCY,
+    num_males,
+    num_females,
+    Npersons,
+    h2_1,
+    h2_3a,
+    h2_3b1,
+    h2_3b2,
+    h2_5,
+    h2_6,
+    h2_7,
+    h2_8,
+    h2_11a,
+    h2_12,
+    h2_14,
+    h2_15,
+    h2_21,
+    HHLD_WEIGHT
+  )
+```
+
+# Working Data Labels
+
+```{r}
+working_data_labels <- tibble(
+  variable = names(Thesis_Working_Data),
+  variable_label = sapply(Thesis_Working_Data, function(x) {
+    lab <- attr(x, "label")
+    if (is.null(lab)) NA_character_ else as.character(lab)
+  }),
+  value_labels = sapply(Thesis_Working_Data, function(x) {
+    vals <- attr(x, "labels")
+    if (is.null(vals)) NA_character_
+    else paste(names(vals), vals, collapse = "; ")
+  })
+)
+
+print(working_data_labels, n = Inf, width = Inf)
+```
+
+# Rename Columns
+
+```{r}
+Thesis_Working_Data <- Thesis_Working_Data |>
+  rename(
+    household_id    = CompositeKey,
+    district        = DISTRICT_ID,
+    constituency    = CONSTITUENCY,
+    males           = num_males,
+    females         = num_females,
+    household_size  = Npersons,
+    building_type   = h2_1,
+    tenure_status   = h2_3a,
+    monthly_rent    = h2_3b1,
+    rent_furnishing = h2_3b2,
+    roof_material   = h2_5,
+    wall_material   = h2_6,
+    year_built      = h2_7,
+    water_source    = h2_8,
+    toilet_type     = h2_11a,
+    lighting_source = h2_12,
+    rooms           = h2_14,
+    bedrooms        = h2_15,
+    vehicles_owned  = h2_21,
+    household_weight = HHLD_WEIGHT
+  )
+```
+
+```{r}
+Thesis_Working_Data <- Thesis_Working_Data |>
+  mutate(
+    district     = as.character(haven::as_factor(district)),
+    constituency = as.character(haven::as_factor(constituency)),
+    monthly_rent = as.numeric(monthly_rent)
+  )
+```
+
+# Variable Reference Table
+
+```{r}
+labels_reference <- tibble(
+  variable = names(Thesis_Working_Data),
+  description = c(
+    "Household unique identifier",
+    "Administrative district",
+    "Electoral constituency",
+    "Number of male household members",
+    "Number of female household members",
+    "Total persons in household",
+    "Type of building structure",
+    "Housing tenure status",
+    "Monthly rent paid",
+    "Rental furnishing status",
+    "Roof material",
+    "Wall material",
+    "Year dwelling constructed",
+    "Main water source",
+    "Type of toilet facility",
+    "Main lighting source",
+    "Total number of rooms",
+    "Number of bedrooms",
+    "Number of vehicles owned",
+    "Survey household weight"
+  )
+)
+
+labels_reference
+```
+
+# Short-Term Rentals Per District
+
+> **Note:** The `dwell_status` variable is not yet available in the dataset.
+
+Short-term rentals are conceptually defined as dwellings classified in the census dwelling-status variable as either **Short-Term Occupation (code 8)** or **AirBNB (code 12)**.
+
+A binary indicator $STR_i$ is defined as:
+
+$$
+STR_i =
+\begin{cases}
+1 & \text{if } dwell\_status_i \in \{8,12\} \\
+0 & \text{otherwise}
+\end{cases}
+$$
+
+This indicator equals 1 when a dwelling is used for short-term accommodation and 0 otherwise.
+
+The number of short-term rentals in district $d$ is calculated as the weighted sum of these dwellings using the household sampling weight $w_i$:
+
+$$
+STR_d = \sum_{i \in d} STR_i \times w_i
+$$
+
+where $i$ indexes individual dwellings and $w_i$ represents the household survey weight.
+
+# Rental Supply by District
+
+```{r}
+Thesis_Working_Data <- Thesis_Working_Data |>
+  mutate(
+    long_term_rental = if_else(tenure_status %in% c(7, 8, 10), 1, 0)
+  )
+
+Rental_supply_per_district <- Thesis_Working_Data |>
+  group_by(district) |>
+  summarise(
+    long_term_rentals = sum(long_term_rental * household_weight, na.rm = TRUE),
+    total_households  = sum(household_weight, na.rm = TRUE),
+    rental_share      = long_term_rentals / total_households,
+    .groups = "drop"
+  ) |>
+  arrange(desc(long_term_rentals))
+
+Rental_supply_per_district
+```
+
+> **Note:** Districts 1, 2, and 3 appear to all correspond to Castries (the capital), likely subdivided — needs confirmation with the statistics office.
+
+\pagebreak
+
+# Average Monthly Rent by District
+
+```{r}
+Rent_per_district <- Thesis_Working_Data |>
+  filter(
+    tenure_status %in% c(7, 8, 10),
+    !is.na(monthly_rent),
+    monthly_rent > 0
+  ) |>
+  group_by(district) |>
+  summarise(
+    avg_monthly_rent    = weighted.mean(monthly_rent, household_weight, na.rm = TRUE),
+    renting_households  = sum(household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(avg_monthly_rent))
+
+Rent_per_district
+```
+
+# Home Ownership Rates by District
+
+```{r}
+Thesis_Working_Data <- Thesis_Working_Data |>
+  mutate(
+    owner_occupied = if_else(tenure_status %in% c(1, 2), 1, 0)
+  )
+
+Homeownership_per_district <- Thesis_Working_Data |>
+  group_by(district) |>
+  summarise(
+    owner_households   = sum(owner_occupied * household_weight, na.rm = TRUE),
+    total_households   = sum(household_weight, na.rm = TRUE),
+    homeownership_rate = owner_households / total_households,
+    .groups = "drop"
+  ) |>
+  arrange(desc(homeownership_rate))
+
+Homeownership_per_district
+```
+
+# Household Crowding Indicators
+
+```{r}
+Thesis_Working_Data <- Thesis_Working_Data |>
+  mutate(
+    persons_per_room    = household_size / rooms,
+    persons_per_bedroom = household_size / bedrooms,
+    overcrowded         = if_else(persons_per_bedroom > 2, 1, 0)
+  )
+```
+
+## Crowding by District
+
+```{r}
+Crowding_per_district <- Thesis_Working_Data |>
+  group_by(district) |>
+  summarise(
+    avg_persons_per_room    = weighted.mean(persons_per_room, household_weight, na.rm = TRUE),
+    avg_persons_per_bedroom = weighted.mean(persons_per_bedroom, household_weight, na.rm = TRUE),
+    overcrowding_rate       = weighted.mean(overcrowded, household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(overcrowding_rate))
+
+Crowding_per_district
+```
+
+# Spare Bedroom Capacity
+
+```{r}
+Thesis_Working_Data <- Thesis_Working_Data |>
+  mutate(
+    spare_bedrooms = bedrooms - household_size
+  )
+
+Spare_bedrooms_per_district <- Thesis_Working_Data |>
+  group_by(district) |>
+  summarise(
+    avg_spare_bedrooms = weighted.mean(spare_bedrooms, household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(avg_spare_bedrooms))
+
+Spare_bedrooms_per_district
+```
+
+# Housing Quality Indicators
+
+```{r}
+Thesis_Working_Data <- Thesis_Working_Data |>
+  mutate(
+    piped_water    = if_else(water_source %in% c(1, 2), 1, 0),
+    electricity    = if_else(lighting_source == 1, 1, 0),
+    improved_toilet = if_else(toilet_type %in% c(1, 2, 3), 1, 0),
+    durable_walls  = if_else(wall_material %in% c(1, 2, 3), 1, 0),
+    durable_roof   = if_else(roof_material %in% c(1, 2, 3), 1, 0)
+  )
+```
+
+## Housing Quality by District
+
+```{r}
+Housing_quality_per_district <- Thesis_Working_Data |>
+  group_by(district) |>
+  summarise(
+    piped_water_rate     = weighted.mean(piped_water, household_weight, na.rm = TRUE),
+    electricity_rate     = weighted.mean(electricity, household_weight, na.rm = TRUE),
+    improved_toilet_rate = weighted.mean(improved_toilet, household_weight, na.rm = TRUE),
+    durable_walls_rate   = weighted.mean(durable_walls, household_weight, na.rm = TRUE),
+    durable_roof_rate    = weighted.mean(durable_roof, household_weight, na.rm = TRUE),
+    avg_vehicles         = weighted.mean(vehicles_owned, household_weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+Housing_quality_per_district
+```
+
+# Housing Age by District
+
+```{r}
+Year_built_per_district <- Thesis_Working_Data |>
+  filter(!is.na(year_built)) |>
+  group_by(district) |>
+  summarise(
+    avg_year_built = weighted.mean(year_built, household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(avg_year_built))
+
+Year_built_per_district
+```
+
+# District Summary Table
+
+```{r}
+District_Analysis_Table <- Rental_supply_per_district |>
+  select(district, long_term_rentals, total_households, rental_share) |>
+  left_join(
+    Rent_per_district |> select(district, avg_monthly_rent, renting_households),
+    by = "district"
+  ) |>
+  left_join(
+    Homeownership_per_district |> select(district, owner_households, homeownership_rate),
+    by = "district"
+  ) |>
+  left_join(
+    Crowding_per_district |>
+      select(district, avg_persons_per_room, avg_persons_per_bedroom, overcrowding_rate),
+    by = "district"
+  ) |>
+  left_join(
+    Spare_bedrooms_per_district |> select(district, avg_spare_bedrooms),
+    by = "district"
+  ) |>
+  left_join(
+    Housing_quality_per_district |>
+      select(
+        district,
+        piped_water_rate,
+        electricity_rate,
+        improved_toilet_rate,
+        durable_walls_rate,
+        durable_roof_rate,
+        avg_vehicles
+      ),
+    by = "district"
+  ) |>
+  left_join(
+    Year_built_per_district |> select(district, avg_year_built),
+    by = "district"
+  ) |>
+  arrange(desc(total_households))
+
+District_Analysis_Table
+```
+
+\pagebreak
+
+# Potential Treatments for Thesis
+
+## Expansion of Short-Term Rental Platforms (Technology Shock)
+
+One possible treatment could be the global expansion of short-term rental platforms such as Airbnb after around 2014, which may have made it easier for homeowners to rent rooms or entire homes to tourists. Although the platform became available across Saint Lucia at roughly the same time, districts may have been affected differently depending on their housing characteristics. The treatment could therefore be defined as districts with higher hosting suitability in 2010 — such as those with more spare bedrooms, higher internet access, or closer proximity to tourism areas. These districts may have been more likely to adopt short-term rentals once the platforms became widely used, potentially leading to housing market effects such as higher rents, reduced owner-occupancy, or changes in housing supply.
+
+## Expansion of International Airlift (Tourism Demand Shock)
+
+Another possible treatment could be increases in international flight routes to Saint Lucia between roughly 2015 and 2021. New nonstop flights may have increased the number of visitors arriving on the island, which could raise demand for short-term accommodation outside traditional hotels. Although the additional flights affect the whole country, districts closer to tourism infrastructure may experience stronger effects. The treatment could therefore be defined as districts with higher baseline tourism exposure — such as areas near beaches, resorts, or established tourism zones — where growth in short-term rentals may have been more pronounced as visitor demand increased.
+
+## Tourism Investment Incentives and Real Estate Development (Housing Supply Shock)
+
+A third possible treatment could be government policies that encouraged tourism-related real estate development. The Tourism Stimulus and Investment Act (2014) introduced tax concessions to encourage investment in villas, condominiums, and luxury tourism developments, and the Citizenship by Investment Act (2015) introduced additional incentives for foreign investment in approved real estate projects. These policies apply nationally but may affect housing markets unevenly depending on where tourism-related development occurs. The treatment could therefore be defined as districts located near tourism-oriented developments or investment projects after these policies were introduced, where the incentives may have increased the supply of properties that could potentially be used as short-term rentals.

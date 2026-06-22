@@ -1,0 +1,1001 @@
+---
+title: "STR Data Mining for Thesis"
+subtitle: "Saint Lucia Housing Thesis"
+author: "Mave Kimara Alexander"
+date: today
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    fig-width: 8
+    fig-height: 5
+    keep-tex: false
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(haven)
+library(tidyverse)
+library(labelled)
+library(kableExtra)
+library(scales)
+library(ggrepel)
+
+theme_set(
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    plot.caption  = element_text(size = 8,  color = "grey55"),
+    axis.text     = element_text(size = 9),
+    legend.position = "bottom",
+    legend.text   = element_text(size = 9)
+  )
+)
+
+caption_2010 <- "Source: Saint Lucia Population and Housing Census 2010"
+```
+
+# Overview
+
+This document presents the district-level housing profile derived from the
+2010 Saint Lucia Population and Housing Census. It serves as the
+pre-treatment baseline for the difference-in-differences analysis.
+All estimates are weighted using the census household weight (HWEIGHT).
+
+The three Castries sub-districts are labelled according to their
+official SPSS classifications:
+
+- **Castries City** -- the urban core (District 1)
+- **Castries Suburban** -- the peri-urban belt (District 2)
+- **Castries Rural** -- the rural hinterland (District 3)
+
+---
+
+# Data Preparation
+
+```{r}
+#| label: load-and-build
+
+Raw_Census_Data_2010 <- read_sav("person_house_merged.sav")
+
+Raw_Census_Data_2010 <- Raw_Census_Data_2010 |>
+  mutate(household_id_2010 = paste(DISTRICT, ED, HH, sep = "_"))
+
+Thesis_Working_Data_2010 <- Raw_Census_Data_2010 |>
+  distinct(household_id_2010, .keep_all = TRUE) |>
+  select(
+    household_id_2010, DISTRICT, poldist, NPERS,
+    H11_TYPE, H13_OWN, H15_WALLS, H16_ROOF, H17_YR_BUILT,
+    H18_WATER, H20_TOILET, H21_LIGHTING,
+    H23_ROOMS, H24_BEDROOMS, H30_VEHICLES, HWEIGHT
+  ) |>
+  rename(
+    household_id     = household_id_2010,
+    district_raw     = DISTRICT,
+    constituency     = poldist,
+    household_size   = NPERS,
+    building_type    = H11_TYPE,
+    tenure_status    = H13_OWN,
+    wall_material    = H15_WALLS,
+    roof_material    = H16_ROOF,
+    year_built       = H17_YR_BUILT,
+    water_source     = H18_WATER,
+    toilet_type      = H20_TOILET,
+    lighting_source  = H21_LIGHTING,
+    rooms            = H23_ROOMS,
+    bedrooms         = H24_BEDROOMS,
+    vehicles_owned   = H30_VEHICLES,
+    household_weight = HWEIGHT
+  ) |>
+  zap_labels() |>
+  mutate(
+    district = case_when(
+      district_raw == 1  ~ "Castries City",
+      district_raw == 2  ~ "Castries Suburban",
+      district_raw == 3  ~ "Castries Rural",
+      district_raw == 4  ~ "Anse La Raye",
+      district_raw == 5  ~ "Canaries",
+      district_raw == 6  ~ "Soufriere",
+      district_raw == 7  ~ "Choiseul",
+      district_raw == 8  ~ "Laborie",
+      district_raw == 9  ~ "Vieux Fort",
+      district_raw == 10 ~ "Micoud",
+      district_raw == 11 ~ "Dennery",
+      district_raw == 12 ~ "Gros Islet",
+      TRUE               ~ paste0("Unknown (", district_raw, ")")
+    ),
+    owner_occupied   = if_else(tenure_status %in% c(1, 2), 1L, 0L),
+    long_term_rental = if_else(tenure_status %in% c(3, 4), 1L, 0L),
+    across(
+      c(household_size, building_type, tenure_status, wall_material,
+        roof_material, year_built, water_source, toilet_type,
+        lighting_source, rooms, bedrooms, vehicles_owned),
+      ~ if_else(. %in% c(-999999999, 999999999), NA_real_, as.numeric(.))
+    ),
+    piped_water     = if_else(water_source    %in% c(1, 2),    1L, 0L, missing = NA_integer_),
+    electricity     = if_else(lighting_source == 1,             1L, 0L, missing = NA_integer_),
+    improved_toilet = if_else(toilet_type     %in% c(1, 2, 3), 1L, 0L, missing = NA_integer_),
+    durable_walls   = if_else(wall_material   %in% c(1, 2, 3), 1L, 0L, missing = NA_integer_),
+    durable_roof    = if_else(roof_material   %in% c(1, 2, 3), 1L, 0L, missing = NA_integer_),
+    rooms_clean         = if_else(rooms    > 0, rooms,    NA_real_),
+    bedrooms_clean      = if_else(bedrooms > 0, bedrooms, NA_real_),
+    persons_per_room    = household_size / rooms_clean,
+    persons_per_bedroom = household_size / bedrooms_clean,
+    overcrowded         = if_else(persons_per_bedroom > 2, 1L, 0L),
+    spare_bedrooms      = bedrooms_clean - household_size,
+    hosting_suitable = if_else(
+      spare_bedrooms  > 0 &
+      piped_water     == 1 &
+      electricity     == 1 &
+      improved_toilet == 1,
+      1L, 0L
+    ),
+    census_year = 2010L
+  ) |>
+  filter(!is.na(district))
+```
+
+```{r}
+#| label: out-hh-count
+
+Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(households = comma(round(sum(household_weight, na.rm = TRUE))),
+            .groups = "drop") |>
+  arrange(desc(as.numeric(gsub(",", "", households)))) |>
+  kbl(col.names = c("District", "Weighted Households"),
+      caption   = "Weighted Household Count by District -- 2010") |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width = FALSE, position = "center")
+```
+
+---
+
+# Rental Supply
+
+```{r}
+#| label: rental-supply-calc
+
+Rental_supply_2010 <- Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(
+    long_term_rentals = sum(long_term_rental * household_weight, na.rm = TRUE),
+    total_households  = sum(household_weight, na.rm = TRUE),
+    rental_share      = long_term_rentals / total_households,
+    .groups = "drop"
+  ) |>
+  arrange(desc(rental_share))
+```
+
+```{r}
+#| label: out-rental-supply
+
+Rental_supply_2010 |>
+  mutate(
+    long_term_rentals = comma(round(long_term_rentals)),
+    total_households  = comma(round(total_households)),
+    rental_share      = percent(rental_share, accuracy = 0.1)
+  ) |>
+  kbl(col.names = c("District", "Long-Term Rentals", "Total HH", "Rental Share"),
+      caption   = "Long-Term Rental Supply by District -- 2010 (Weighted)") |>
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+```{r}
+#| label: fig-rental-supply
+
+Rental_supply_2010 |>
+  ggplot(aes(x = reorder(district, rental_share), y = rental_share)) +
+  geom_col(fill = "#2C7BB6") +
+  geom_text(aes(label = percent(rental_share, accuracy = 0.1)),
+            hjust = -0.1, size = 3) +
+  scale_y_continuous(labels = percent, expand = expansion(mult = c(0, 0.2))) +
+  coord_flip() +
+  labs(title = "Long-Term Rental Share by District -- 2010",
+       x = NULL, y = "Share of Total Households", caption = caption_2010)
+```
+
+---
+
+# Homeownership
+
+```{r}
+#| label: homeownership-calc
+
+Homeownership_2010 <- Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(
+    owner_households   = sum(owner_occupied * household_weight, na.rm = TRUE),
+    total_households   = sum(household_weight, na.rm = TRUE),
+    homeownership_rate = owner_households / total_households,
+    .groups = "drop"
+  ) |>
+  arrange(desc(homeownership_rate))
+```
+
+```{r}
+#| label: out-homeownership
+
+Homeownership_2010 |>
+  mutate(
+    owner_households   = comma(round(owner_households)),
+    total_households   = comma(round(total_households)),
+    homeownership_rate = percent(homeownership_rate, accuracy = 0.1)
+  ) |>
+  kbl(col.names = c("District", "Owner HH", "Total HH", "Ownership Rate"),
+      caption   = "Homeownership by District -- 2010 (Weighted)") |>
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+---
+
+# Household Crowding
+
+```{r}
+#| label: crowding-calc
+
+Crowding_2010 <- Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(
+    avg_persons_per_room    = weighted.mean(persons_per_room,    household_weight, na.rm = TRUE),
+    avg_persons_per_bedroom = weighted.mean(persons_per_bedroom, household_weight, na.rm = TRUE),
+    overcrowding_rate       = weighted.mean(overcrowded,         household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(overcrowding_rate))
+```
+
+```{r}
+#| label: out-crowding
+
+Crowding_2010 |>
+  mutate(
+    avg_persons_per_room    = round(avg_persons_per_room, 2),
+    avg_persons_per_bedroom = round(avg_persons_per_bedroom, 2),
+    overcrowding_rate       = percent(overcrowding_rate, accuracy = 0.1)
+  ) |>
+  kbl(col.names = c("District", "Persons/Room", "Persons/Bedroom", "Overcrowding Rate"),
+      caption   = "Crowding Indicators by District -- 2010 (Weighted)") |>
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+---
+
+# Housing Quality
+
+```{r}
+#| label: quality-calc
+
+Housing_quality_2010 <- Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(
+    piped_water_rate     = weighted.mean(piped_water,     household_weight, na.rm = TRUE),
+    electricity_rate     = weighted.mean(electricity,     household_weight, na.rm = TRUE),
+    improved_toilet_rate = weighted.mean(improved_toilet, household_weight, na.rm = TRUE),
+    durable_walls_rate   = weighted.mean(durable_walls,   household_weight, na.rm = TRUE),
+    durable_roof_rate    = weighted.mean(durable_roof,    household_weight, na.rm = TRUE),
+    avg_vehicles         = weighted.mean(vehicles_owned,  household_weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r}
+#| label: out-housing-quality
+
+Housing_quality_2010 |>
+  mutate(
+    across(piped_water_rate:durable_roof_rate,
+           ~ if_else(is.na(.), "NA", percent(., accuracy = 0.1))),
+    avg_vehicles = round(avg_vehicles, 2)
+  ) |>
+  kbl(col.names = c("District", "Piped Water", "Electricity",
+                    "Improved Toilet", "Durable Walls", "Durable Roof", "Avg. Vehicles"),
+      caption   = "Housing Quality Indicators by District -- 2010 (Weighted)") |>
+  kable_styling(latex_options = c("striped", "hold_position", "scale_down"))
+```
+
+---
+
+# Spare Bedroom Capacity
+
+```{r}
+#| label: spare-calc
+
+Spare_bedrooms_2010 <- Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(
+    avg_spare_bedrooms = weighted.mean(spare_bedrooms, household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(avg_spare_bedrooms))
+```
+
+```{r}
+#| label: out-spare
+
+Spare_bedrooms_2010 |>
+  mutate(avg_spare_bedrooms = round(avg_spare_bedrooms, 2)) |>
+  kbl(col.names = c("District", "Avg. Spare Bedrooms"),
+      caption   = "Average Spare Bedroom Capacity by District -- 2010 (Weighted)") |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width = FALSE, position = "center")
+```
+
+---
+
+# Hosting Suitability Index
+
+The Hosting Suitability Index (HSI) is the pre-treatment instrument in the
+difference-in-differences strategy. A household is classified as hosting-suitable
+if it simultaneously has at least one spare bedroom, piped water, public
+electricity, and an improved toilet facility. Constructing this index from the
+2010 census -- before short-term rental platforms became widely used in
+Saint Lucia -- captures pre-existing district characteristics that are
+plausibly exogenous to any subsequent platform adoption decisions.
+
+```{r}
+#| label: suitability-calc
+
+Suitability_2010 <- Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(
+    suitability_index     = weighted.mean(hosting_suitable, household_weight, na.rm = TRUE),
+    suitable_hh_estimated = sum(hosting_suitable * household_weight, na.rm = TRUE),
+    total_households      = sum(household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(suitability_index))
+```
+
+```{r}
+#| label: out-suitability
+
+Suitability_2010 |>
+  mutate(
+    suitability_index     = percent(suitability_index, accuracy = 0.1),
+    suitable_hh_estimated = comma(round(suitable_hh_estimated)),
+    total_households      = comma(round(total_households))
+  ) |>
+  kbl(col.names = c("District", "Suitability Index", "Suitable HH (Est.)", "Total HH"),
+      caption   = "Hosting Suitability Index by District -- 2010") |>
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+```{r}
+#| label: fig-suitability
+
+Suitability_2010 |>
+  filter(!is.na(suitability_index)) |>
+  ggplot(aes(x = reorder(district, suitability_index),
+             y = suitability_index,
+             fill = suitability_index)) +
+  geom_col() +
+  geom_text(aes(label = percent(suitability_index, accuracy = 0.1)),
+            hjust = -0.1, size = 3) +
+  scale_y_continuous(labels = percent, expand = expansion(mult = c(0, 0.2))) +
+  scale_fill_gradient(low = "#fee8c8", high = "#e34a33", guide = "none") +
+  coord_flip() +
+  labs(
+    title    = "Hosting Suitability Index by District -- 2010",
+    subtitle = "Share of households with spare bedroom, piped water, electricity and improved toilet",
+    x = NULL, y = "Suitability Index (%)",
+    caption = caption_2010
+  )
+```
+
+---
+
+# District Summary
+
+```{r}
+#| label: out-summary
+
+District_Summary_2010 <- Rental_supply_2010 |>
+  select(district, total_households, rental_share) |>
+  left_join(Homeownership_2010  |> select(district, homeownership_rate), by = "district") |>
+  left_join(Crowding_2010       |> select(district, overcrowding_rate),  by = "district") |>
+  left_join(Suitability_2010    |> select(district, suitability_index),  by = "district") |>
+  left_join(Housing_quality_2010|> select(district, piped_water_rate, electricity_rate),
+            by = "district") |>
+  mutate(census_year = 2010L)
+
+District_Summary_2010 |>
+  mutate(
+    total_households   = comma(round(total_households)),
+    rental_share       = percent(rental_share,       accuracy = 0.1),
+    homeownership_rate = percent(homeownership_rate, accuracy = 0.1),
+    overcrowding_rate  = percent(overcrowding_rate,  accuracy = 0.1),
+    suitability_index  = if_else(is.na(suitability_index), "NA",
+                                 percent(suitability_index, accuracy = 0.1)),
+    piped_water_rate   = if_else(is.na(piped_water_rate), "NA",
+                                 percent(piped_water_rate, accuracy = 0.1)),
+    electricity_rate   = percent(electricity_rate,   accuracy = 0.1)
+  ) |>
+  select(district, total_households, rental_share, homeownership_rate,
+         overcrowding_rate, suitability_index, piped_water_rate, electricity_rate) |>
+  kbl(
+    col.names = c("District", "Total HH", "Rental Share", "Ownership Rate",
+                  "Overcrowding", "Suitability", "Piped Water", "Electricity"),
+    caption   = "District Housing Indicators -- 2010"
+  ) |>
+  kable_styling(latex_options = c("striped", "hold_position", "scale_down")) |>
+  add_header_above(c(" " = 2, "Tenure" = 2, "Crowding" = 1, "STR Exposure" = 3))
+```
+
+---
+
+# Pre-Treatment Relationship
+
+The figure below shows the cross-sectional relationship between the 2010
+Hosting Suitability Index and the long-term rental share by district.
+A positive association is expected -- more suitable districts naturally
+attract more renters. This baseline correlation is not a causal finding.
+The causal argument in the thesis concerns whether districts with higher
+pre-treatment suitability experienced larger changes in housing outcomes
+between 2010 and 2022.
+
+```{r}
+#| label: fig-suitability-rental
+
+District_Summary_2010 |>
+  filter(!is.na(suitability_index), !is.na(rental_share)) |>
+  ggplot(aes(x = suitability_index, y = rental_share, label = district)) +
+  geom_point(aes(size = total_households), color = "#2C7BB6", alpha = 0.7) +
+  geom_text_repel(size = 3.2, max.overlaps = 12) +
+  geom_smooth(method = "lm", se = TRUE, color = "#D7191C",
+              linewidth = 0.8, linetype = "dashed") +
+  scale_x_continuous(labels = percent) +
+  scale_y_continuous(labels = percent) +
+  scale_size_continuous(labels = comma, range = c(2, 8),
+                        guide  = guide_legend(title = "Total HH")) +
+  labs(
+    title   = "2010 Hosting Suitability vs Rental Share",
+    subtitle = "Pre-treatment baseline relationship by district",
+    x       = "Hosting Suitability Index (2010)",
+    y       = "Long-Term Rental Share (2010)",
+    caption = caption_2010
+  )
+```
+
+---
+
+# 2022 Census Data
+
+```{r}
+#| label: load-2022
+
+caption_2022 <- "Source: Saint Lucia Population and Housing Census 2022"
+
+Raw_Census_Data_2022 <- read_sav("PersonHHoldMerge 2022 Annon.sav")
+
+Thesis_Working_Data_2022 <- Raw_Census_Data_2022 |>
+  distinct(CompositeKey, .keep_all = TRUE) |>
+  select(
+    CompositeKey, DISTRICT_ID, CONSTITUENCY,
+    num_males, num_females, Npersons,
+    h2_1, h2_3a, h2_3b1, h2_3b2,
+    h2_5, h2_6, h2_7, h2_8,
+    h2_11a, h2_12, h2_14, h2_15, h2_21,
+    HHLD_WEIGHT
+  ) |>
+  rename(
+    household_id     = CompositeKey,
+    district_raw     = DISTRICT_ID,
+    constituency     = CONSTITUENCY,
+    males            = num_males,
+    females          = num_females,
+    household_size   = Npersons,
+    building_type    = h2_1,
+    tenure_status    = h2_3a,
+    monthly_rent     = h2_3b1,
+    rent_furnishing  = h2_3b2,
+    roof_material    = h2_5,
+    wall_material    = h2_6,
+    year_built       = h2_7,
+    water_source     = h2_8,
+    toilet_type      = h2_11a,
+    lighting_source  = h2_12,
+    rooms            = h2_14,
+    bedrooms         = h2_15,
+    vehicles_owned   = h2_21,
+    household_weight = HHLD_WEIGHT
+  ) |>
+  zap_labels() |>
+  mutate(
+    district = case_when(
+      district_raw == 1  ~ "Castries City",
+      district_raw == 2  ~ "Castries Suburban",
+      district_raw == 3  ~ "Castries Rural",
+      district_raw == 4  ~ "Anse La Raye",
+      district_raw == 5  ~ "Canaries",
+      district_raw == 6  ~ "Soufriere",
+      district_raw == 7  ~ "Choiseul",
+      district_raw == 8  ~ "Laborie",
+      district_raw == 9  ~ "Vieux Fort",
+      district_raw == 10 ~ "Micoud",
+      district_raw == 11 ~ "Dennery",
+      district_raw == 12 ~ "Gros Islet",
+      TRUE               ~ paste0("Unknown (", district_raw, ")")
+    ),
+    monthly_rent = as.numeric(monthly_rent),
+    across(
+      c(males, females, household_size, monthly_rent, rooms, bedrooms,
+        vehicles_owned, roof_material, wall_material, year_built,
+        water_source, toilet_type, lighting_source, tenure_status, building_type),
+      ~ if_else(. %in% c(-999999999, 999999999), NA_real_, as.numeric(.))
+    ),
+    owner_occupied   = if_else(tenure_status %in% c(1, 2, 3, 4), 1L, 0L),
+    long_term_rental = if_else(tenure_status %in% c(7, 8, 10),   1L, 0L),
+    piped_water      = if_else(water_source    %in% c(1, 2),    1L, 0L, missing = NA_integer_),
+    electricity      = if_else(lighting_source == 1,             1L, 0L, missing = NA_integer_),
+    improved_toilet  = if_else(toilet_type     %in% c(1, 2, 3), 1L, 0L, missing = NA_integer_),
+    durable_walls    = if_else(wall_material   %in% c(1, 2, 3), 1L, 0L, missing = NA_integer_),
+    durable_roof     = if_else(roof_material   %in% c(1, 2, 3), 1L, 0L, missing = NA_integer_),
+    rooms_clean         = if_else(rooms    > 0, rooms,    NA_real_),
+    bedrooms_clean      = if_else(bedrooms > 0, bedrooms, NA_real_),
+    persons_per_room    = household_size / rooms_clean,
+    persons_per_bedroom = household_size / bedrooms_clean,
+    overcrowded         = if_else(persons_per_bedroom > 2, 1L, 0L),
+    spare_bedrooms      = bedrooms_clean - household_size,
+    hosting_suitable = if_else(
+      spare_bedrooms  > 0 &
+      piped_water     == 1 &
+      electricity     == 1 &
+      improved_toilet == 1,
+      1L, 0L
+    ),
+    census_year = 2022L
+  ) |>
+  filter(!is.na(district))
+```
+
+## Rental Supply (2022)
+
+```{r}
+#| label: rental-2022-calc
+
+Rental_supply_2022 <- Thesis_Working_Data_2022 |>
+  group_by(district) |>
+  summarise(
+    long_term_rentals = sum(long_term_rental * household_weight, na.rm = TRUE),
+    total_households  = sum(household_weight, na.rm = TRUE),
+    rental_share      = long_term_rentals / total_households,
+    .groups = "drop"
+  ) |>
+  arrange(desc(rental_share))
+```
+
+```{r}
+#| label: out-rental-2022
+
+Rental_supply_2022 |>
+  mutate(
+    long_term_rentals = comma(round(long_term_rentals)),
+    total_households  = comma(round(total_households)),
+    rental_share      = percent(rental_share, accuracy = 0.1)
+  ) |>
+  kbl(col.names = c("District", "Long-Term Rentals", "Total HH", "Rental Share"),
+      caption   = "Long-Term Rental Supply by District -- 2022 (Weighted)") |>
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+## Average Monthly Rent (2022)
+
+```{r}
+#| label: rent-2022-calc
+
+Rent_2022 <- Thesis_Working_Data_2022 |>
+  filter(tenure_status %in% c(7, 8, 10),
+         !is.na(monthly_rent), monthly_rent > 0, monthly_rent < 99999) |>
+  group_by(district) |>
+  summarise(
+    avg_monthly_rent   = weighted.mean(monthly_rent, household_weight, na.rm = TRUE),
+    renting_households = sum(household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(avg_monthly_rent))
+```
+
+```{r}
+#| label: out-rent-2022
+
+Rent_2022 |>
+  mutate(
+    avg_monthly_rent   = dollar(round(avg_monthly_rent), prefix = "EC$"),
+    renting_households = comma(round(renting_households))
+  ) |>
+  kbl(col.names = c("District", "Avg. Monthly Rent", "Renting Households"),
+      caption   = "Average Monthly Long-Term Rent by District -- 2022 (Weighted)") |>
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+## Homeownership (2022)
+
+```{r}
+#| label: homeownership-2022-calc
+
+Homeownership_2022 <- Thesis_Working_Data_2022 |>
+  group_by(district) |>
+  summarise(
+    owner_households   = sum(owner_occupied * household_weight, na.rm = TRUE),
+    total_households   = sum(household_weight, na.rm = TRUE),
+    homeownership_rate = owner_households / total_households,
+    .groups = "drop"
+  ) |>
+  arrange(desc(homeownership_rate))
+```
+
+```{r}
+#| label: out-homeownership-2022
+
+Homeownership_2022 |>
+  mutate(
+    owner_households   = comma(round(owner_households)),
+    total_households   = comma(round(total_households)),
+    homeownership_rate = percent(homeownership_rate, accuracy = 0.1)
+  ) |>
+  kbl(col.names = c("District", "Owner HH", "Total HH", "Ownership Rate"),
+      caption   = "Homeownership by District -- 2022 (Weighted)") |>
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+## Crowding (2022)
+
+```{r}
+#| label: crowding-2022-calc
+
+Crowding_2022 <- Thesis_Working_Data_2022 |>
+  group_by(district) |>
+  summarise(
+    avg_persons_per_room    = weighted.mean(persons_per_room,    household_weight, na.rm = TRUE),
+    avg_persons_per_bedroom = weighted.mean(persons_per_bedroom, household_weight, na.rm = TRUE),
+    overcrowding_rate       = weighted.mean(overcrowded,         household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(overcrowding_rate))
+```
+
+```{r}
+#| label: out-crowding-2022
+
+Crowding_2022 |>
+  mutate(
+    avg_persons_per_room    = round(avg_persons_per_room, 2),
+    avg_persons_per_bedroom = round(avg_persons_per_bedroom, 2),
+    overcrowding_rate       = if_else(is.na(overcrowding_rate), "NA",
+                                      percent(overcrowding_rate, accuracy = 0.1))
+  ) |>
+  kbl(col.names = c("District", "Persons/Room", "Persons/Bedroom", "Overcrowding Rate"),
+      caption   = "Crowding Indicators by District -- 2022 (Weighted)") |>
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+## Hosting Suitability Index (2022)
+
+```{r}
+#| label: suitability-2022-calc
+
+Suitability_2022 <- Thesis_Working_Data_2022 |>
+  group_by(district) |>
+  summarise(
+    suitability_index     = weighted.mean(hosting_suitable, household_weight, na.rm = TRUE),
+    suitable_hh_estimated = sum(hosting_suitable * household_weight, na.rm = TRUE),
+    total_households      = sum(household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(suitability_index))
+```
+
+```{r}
+#| label: out-suitability-2022
+
+Suitability_2022 |>
+  mutate(
+    suitability_index     = if_else(is.na(suitability_index), "NA",
+                                    percent(suitability_index, accuracy = 0.1)),
+    suitable_hh_estimated = comma(round(suitable_hh_estimated)),
+    total_households      = comma(round(total_households))
+  ) |>
+  kbl(col.names = c("District", "Suitability Index", "Suitable HH (Est.)", "Total HH"),
+      caption   = "Hosting Suitability Index by District -- 2022") |>
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+---
+
+# Comparison: 2010 vs 2022
+
+This section stacks the two census years into a panel and presents the
+changes in each key housing outcome by district. These change variables are
+the core dependent variables in the difference-in-differences estimation.
+
+```{r}
+#| label: build-panel
+
+District_Summary_2022 <- Rental_supply_2022 |>
+  select(district, total_households, rental_share) |>
+  left_join(Homeownership_2022 |> select(district, homeownership_rate), by = "district") |>
+  left_join(Crowding_2022      |> select(district, overcrowding_rate),  by = "district") |>
+  left_join(Suitability_2022   |> select(district, suitability_index),  by = "district") |>
+  mutate(census_year = 2022L)
+
+District_Panel <- bind_rows(
+  District_Summary_2010 |>
+    select(district, census_year, total_households,
+           rental_share, homeownership_rate, overcrowding_rate, suitability_index),
+  District_Summary_2022 |>
+    select(district, census_year, total_households,
+           rental_share, homeownership_rate, overcrowding_rate, suitability_index)
+) |>
+  arrange(district, census_year)
+```
+
+## Side-by-Side District Panel
+
+```{r}
+#| label: out-panel-table
+
+District_Panel |>
+  mutate(
+    total_households   = comma(round(total_households)),
+    rental_share       = percent(rental_share,       accuracy = 0.1),
+    homeownership_rate = percent(homeownership_rate, accuracy = 0.1),
+    overcrowding_rate  = if_else(is.na(overcrowding_rate), "NA",
+                                 percent(overcrowding_rate, accuracy = 0.1)),
+    suitability_index  = if_else(is.na(suitability_index), "NA",
+                                 percent(suitability_index, accuracy = 0.1))
+  ) |>
+  select(district, census_year, total_households,
+         rental_share, homeownership_rate, overcrowding_rate, suitability_index) |>
+  kbl(
+    col.names = c("District", "Year", "Total HH", "Rental Share",
+                  "Ownership Rate", "Overcrowding", "Suitability"),
+    caption   = "District Housing Indicators: 2010 vs 2022"
+  ) |>
+  kable_styling(latex_options = c("striped", "hold_position", "scale_down")) |>
+  collapse_rows(columns = 1, valign = "middle") |>
+  add_header_above(c(" " = 3, "Outcome Variables" = 3, "Treatment Variable" = 1))
+```
+
+## Change in Rental Share: 2010 to 2022
+
+```{r}
+#| label: fig-rental-change
+
+District_Panel |>
+  filter(!is.na(rental_share)) |>
+  ggplot(aes(x = factor(census_year), y = rental_share,
+             group = district, color = district)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  scale_y_continuous(labels = percent) +
+  labs(
+    title    = "Long-Term Rental Share by District: 2010 vs 2022",
+    subtitle = "Lines connect the same district across census years",
+    x = "Census Year", y = "Rental Share", color = "District",
+    caption  = "Sources: Saint Lucia Population and Housing Census 2010 and 2022"
+  )
+```
+
+## Change in Homeownership: 2010 to 2022
+
+```{r}
+#| label: fig-ownership-change
+
+District_Panel |>
+  filter(!is.na(homeownership_rate)) |>
+  ggplot(aes(x = factor(census_year), y = homeownership_rate,
+             group = district, color = district)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  scale_y_continuous(labels = percent) +
+  labs(
+    title    = "Homeownership Rate by District: 2010 vs 2022",
+    subtitle = "Lines connect the same district across census years",
+    x = "Census Year", y = "Homeownership Rate", color = "District",
+    caption  = "Sources: Saint Lucia Population and Housing Census 2010 and 2022"
+  )
+```
+
+## Net Change Table
+
+```{r}
+#| label: out-change-table
+
+District_Panel |>
+  select(district, census_year, rental_share, homeownership_rate, overcrowding_rate) |>
+  pivot_wider(
+    names_from  = census_year,
+    values_from = c(rental_share, homeownership_rate, overcrowding_rate)
+  ) |>
+  mutate(
+    delta_rental       = rental_share_2022       - rental_share_2010,
+    delta_ownership    = homeownership_rate_2022  - homeownership_rate_2010,
+    delta_overcrowding = overcrowding_rate_2022   - overcrowding_rate_2010
+  ) |>
+  left_join(
+    Suitability_2010 |> select(district, suitability_index),
+    by = "district"
+  ) |>
+  arrange(desc(suitability_index)) |>
+  mutate(
+    suitability_index  = if_else(is.na(suitability_index), "NA",
+                                 percent(suitability_index, accuracy = 0.1)),
+    delta_rental       = if_else(is.na(delta_rental), "NA",
+                                 percent(delta_rental, accuracy = 0.1)),
+    delta_ownership    = if_else(is.na(delta_ownership), "NA",
+                                 percent(delta_ownership, accuracy = 0.1)),
+    delta_overcrowding = if_else(is.na(delta_overcrowding), "NA",
+                                 percent(delta_overcrowding, accuracy = 0.1))
+  ) |>
+  select(district, suitability_index, delta_rental, delta_ownership, delta_overcrowding) |>
+  kbl(
+    col.names = c("District", "Suitability (2010)",
+                  "Change: Rental Share", "Change: Ownership Rate",
+                  "Change: Overcrowding"),
+    caption   = "Net Change in Housing Outcomes 2010 to 2022, Sorted by Pre-Treatment Suitability"
+  ) |>
+  kable_styling(latex_options = c("striped", "hold_position", "scale_down")) |>
+  add_header_above(c(" " = 1, "Instrument" = 1, "Outcome Changes (2010 to 2022)" = 3))
+```
+
+Districts are sorted by their 2010 Hosting Suitability Index. If the
+theoretical mechanism holds, districts with higher pre-treatment suitability
+should show larger decreases in rental share or homeownership, or larger
+increases in overcrowding, between 2010 and 2022.
+
+---
+
+# Visual Comparisons: 2010 vs 2022
+
+The dumbbell charts below show each district as a horizontal line connecting
+its 2010 value (hollow circle) to its 2022 value (filled circle). A line
+moving right means the indicator increased; left means it decreased.
+This makes direction and magnitude of change immediately readable.
+
+## Rental Share: Direction of Change
+
+```{r}
+#| label: fig-dumbbell-rental
+
+District_Panel |>
+  filter(!is.na(rental_share)) |>
+  select(district, census_year, rental_share) |>
+  pivot_wider(names_from = census_year, values_from = rental_share) |>
+  filter(!is.na(`2010`), !is.na(`2022`)) |>
+  mutate(district = reorder(district, `2010`)) |>
+  ggplot() +
+  geom_segment(aes(x = `2010`, xend = `2022`, y = district, yend = district),
+               color = "grey70", linewidth = 1.2) +
+  geom_point(aes(x = `2010`, y = district), shape = 21,
+             fill = "white", color = "#2C7BB6", size = 4, stroke = 1.5) +
+  geom_point(aes(x = `2022`, y = district), shape = 21,
+             fill = "#2C7BB6", color = "#2C7BB6", size = 4) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.05, 0.1))) +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.5, size = 2.8,
+           color = "grey40",
+           label = "Hollow = 2010    Filled = 2022    Right shift = increase") +
+  labs(
+    title   = "Long-Term Rental Share by District: 2010 vs 2022",
+    subtitle = "Each line shows the change for one district",
+    x = "Long-Term Rental Share", y = NULL,
+    caption = "Sources: Saint Lucia Population and Housing Census 2010 and 2022"
+  )
+```
+
+## Homeownership: Direction of Change
+
+```{r}
+#| label: fig-dumbbell-ownership
+
+District_Panel |>
+  filter(!is.na(homeownership_rate)) |>
+  select(district, census_year, homeownership_rate) |>
+  pivot_wider(names_from = census_year, values_from = homeownership_rate) |>
+  filter(!is.na(`2010`), !is.na(`2022`)) |>
+  mutate(district = reorder(district, `2010`)) |>
+  ggplot() +
+  geom_segment(aes(x = `2010`, xend = `2022`, y = district, yend = district),
+               color = "grey70", linewidth = 1.2) +
+  geom_point(aes(x = `2010`, y = district), shape = 21,
+             fill = "white", color = "#D7191C", size = 4, stroke = 1.5) +
+  geom_point(aes(x = `2022`, y = district), shape = 21,
+             fill = "#D7191C", color = "#D7191C", size = 4) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.05, 0.1))) +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.5, size = 2.8,
+           color = "grey40",
+           label = "Hollow = 2010    Filled = 2022    Right shift = increase") +
+  labs(
+    title    = "Homeownership Rate by District: 2010 vs 2022",
+    subtitle = "Each line shows the change for one district",
+    x = "Homeownership Rate", y = NULL,
+    caption  = "Sources: Saint Lucia Population and Housing Census 2010 and 2022"
+  )
+```
+
+## Net Change Bar Chart
+
+```{r}
+#| label: fig-net-change
+
+District_Panel |>
+  select(district, census_year, rental_share, homeownership_rate) |>
+  pivot_wider(names_from = census_year,
+              values_from = c(rental_share, homeownership_rate)) |>
+  mutate(
+    delta_rental    = rental_share_2022    - rental_share_2010,
+    delta_ownership = homeownership_rate_2022 - homeownership_rate_2010
+  ) |>
+  select(district, delta_rental, delta_ownership) |>
+  pivot_longer(cols = c(delta_rental, delta_ownership),
+               names_to = "metric", values_to = "change") |>
+  mutate(
+    metric = recode(metric,
+                    "delta_rental"    = "Change in Rental Share",
+                    "delta_ownership" = "Change in Homeownership Rate"),
+    direction = if_else(change >= 0, "Increase", "Decrease")
+  ) |>
+  filter(!is.na(change)) |>
+  ggplot(aes(x = reorder(district, change), y = change, fill = direction)) +
+  geom_col() +
+  geom_hline(yintercept = 0, linewidth = 0.5, color = "grey30") +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("Increase" = "#2C7BB6", "Decrease" = "#D7191C")) +
+  coord_flip() +
+  facet_wrap(~ metric, ncol = 2) +
+  labs(
+    title    = "Net Change in Key Housing Indicators: 2010 to 2022",
+    subtitle = "Blue = increase, Red = decrease",
+    x = NULL, y = "Percentage Point Change",
+    fill = NULL,
+    caption  = "Sources: Saint Lucia Population and Housing Census 2010 and 2022"
+  ) +
+  theme(legend.position = "none")
+```
+
+## Suitability vs Outcome Change (Key DiD Chart)
+
+```{r}
+#| label: fig-did-scatter
+
+District_Panel |>
+  select(district, census_year, rental_share, homeownership_rate) |>
+  pivot_wider(names_from = census_year,
+              values_from = c(rental_share, homeownership_rate)) |>
+  mutate(
+    delta_rental    = rental_share_2022    - rental_share_2010,
+    delta_ownership = homeownership_rate_2022 - homeownership_rate_2010
+  ) |>
+  left_join(Suitability_2010 |> select(district, suitability_index), by = "district") |>
+  filter(!is.na(suitability_index)) |>
+  select(district, suitability_index, delta_rental, delta_ownership) |>
+  pivot_longer(cols = c(delta_rental, delta_ownership),
+               names_to = "metric", values_to = "change") |>
+  mutate(metric = recode(metric,
+                         "delta_rental"    = "Change in Rental Share",
+                         "delta_ownership" = "Change in Homeownership Rate")) |>
+  filter(!is.na(change)) |>
+  ggplot(aes(x = suitability_index, y = change, label = district)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_smooth(method = "lm", se = TRUE, color = "#D7191C",
+              linewidth = 0.8, linetype = "dashed", alpha = 0.15) +
+  geom_point(color = "#2C7BB6", size = 3, alpha = 0.8) +
+  geom_text_repel(size = 2.8, max.overlaps = 12) +
+  scale_x_continuous(labels = percent) +
+  scale_y_continuous(labels = percent) +
+  facet_wrap(~ metric, ncol = 2, scales = "free_y") +
+  labs(
+    title    = "Pre-Treatment Suitability vs Outcome Change: 2010 to 2022",
+    subtitle = "A downward slope in rental share and upward slope in ownership would support the hypothesis",
+    x = "Hosting Suitability Index (2010)",
+    y = "Change 2010 to 2022 (pp)",
+    caption = "Sources: Saint Lucia Population and Housing Census 2010 and 2022"
+  )
+```

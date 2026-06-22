@@ -1,0 +1,34 @@
+# Census microdata — not for public distribution
+*.sav
+*.rar
+*.zip
+
+# Excel
+*.xls
+*.xlsx
+
+# Generated outputs
+*.pdf
+*.html
+*.docx
+Rplots.*
+fig*.png
+
+# OSM raw JSON
+*.json
+
+# Large geospatial files
+*.xml
+lca_adm2_all/
+__MACOSX/
+
+# R session artifacts
+.Rhistory
+.RData
+.Rproj.user/
+
+# R session temp files
+.RDataTmp*
+
+# Quarto cache
+*_cache/

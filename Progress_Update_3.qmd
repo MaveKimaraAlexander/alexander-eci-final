@@ -1,0 +1,572 @@
+---
+title: "Thesis Progress Report"
+subtitle: "Update 3 | How AirBnB affected the St. Lucian Housing Market"
+author: "Mave Kimara Alexander | 113077424"
+date: "2026-05-07"
+format: 
+  pdf:
+    toc: true
+    number-sections: false
+    fig-width: 7
+    fig-height: 4.5
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+\newpage
+# Abstract
+
+This study investigates whether Airbnb’s entry into Saint Lucia has negatively affected local housing affordability through rental displacement, rent inflation, housing stock conversion, and increased household crowding. Using a shift-share instrumental variable design with census data from 2010 and 2022, alongside tourism arrival data from Saint Lucia’s Central Statistics Office, the study examines how pre-existing tourism exposure shaped local housing outcomes. The results indicate that high-tourism districts experienced sharp declines in renter-occupied tenure, rising homeownership among remaining residents, and substantially higher rents for the renters who stayed. These patterns are consistent with a displacement and sorting mechanism: short-term rental conversion reduces the supply of long-term rental housing, pricing out lower-income renters who relocate to peripheral districts, while tourism-driven property appreciation attracts wealthier owner-occupiers into vacated units. Overall, the findings suggest that Airbnb’s expansion since 2014 has restructured the tenure composition of Saint Lucia’s most tourism-intensive districts, with affordability costs borne disproportionately by displaced renters rather than visible in aggregate renter-share statistics.
+
+```{r setup}
+library(haven)
+library(tidyverse)
+library(labelled)
+library(knitr)
+library(scales)
+library(ggrepel)
+
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title    = element_text(face = "bold", size = 11),
+      plot.subtitle = element_text(size = 9, color = "grey40"),
+      plot.caption  = element_text(size = 7, color = "grey50"),
+      axis.text     = element_text(size = 8),
+      legend.position = "bottom",
+      legend.text   = element_text(size = 8)
+    )
+)
+```
+
+```{r load-data}
+# ---- Load 2022 census ----
+raw_2022 <- read_sav("PersonHHoldMerge 2022 Annon.sav")
+
+hh_2022 <- raw_2022 |>
+  distinct(CompositeKey, .keep_all = TRUE) |>
+  select(CompositeKey, DISTRICT_ID, Npersons,
+         h2_3a, h2_3b1, h2_15, HHLD_WEIGHT) |>
+  rename(household_id = CompositeKey, district_id = DISTRICT_ID,
+         household_size = Npersons, tenure = h2_3a,
+         monthly_rent = h2_3b1, bedrooms = h2_15,
+         hh_weight = HHLD_WEIGHT) |>
+  zap_labels() |>
+  mutate(
+    across(c(tenure, monthly_rent, bedrooms, household_size),
+           ~ if_else(. %in% c(-999999999, 999999999), NA_real_, as.numeric(.))),
+    district = case_when(
+      district_id %in% 1:3 ~ "Castries",
+      district_id == 4     ~ "Anse-la-Raye",
+      district_id == 5     ~ "Canaries",
+      district_id == 6     ~ "Soufriere",
+      district_id == 7     ~ "Choiseul",
+      district_id == 8     ~ "Laborie",
+      district_id == 9     ~ "Vieux Fort",
+      district_id == 10    ~ "Micoud",
+      district_id == 11    ~ "Dennery",
+      district_id == 12    ~ "Gros Islet",
+      TRUE ~ NA_character_
+    ),
+    owner  = if_else(tenure %in% 1:6,  1, 0),
+    renter = if_else(tenure %in% 7:8,  1, 0),
+    rentfree = if_else(tenure == 9,    1, 0),
+    persons_per_bedroom = if_else(bedrooms > 0,
+                                  household_size / bedrooms, NA_real_)
+  ) |>
+  filter(!is.na(district))
+
+# ---- Load 2010 census ----
+raw_2010 <- read_sav("person_house_merged.sav")
+
+hh_2010 <- raw_2010 |>
+  mutate(household_id_2010 = paste(DISTRICT, ED, HH, sep = "_")) |>
+  distinct(household_id_2010, .keep_all = TRUE) |>
+  select(household_id_2010, DISTRICT, NPERS,
+         H13_OWN, H24_BEDROOMS, HWEIGHT) |>
+  rename(household_id = household_id_2010, district_id = DISTRICT,
+         household_size = NPERS, tenure = H13_OWN,
+         bedrooms = H24_BEDROOMS,
+         hh_weight = HWEIGHT) |>
+  zap_labels() |>
+  mutate(
+    across(c(tenure, bedrooms, household_size),
+           ~ if_else(. %in% c(-999999999, 999999999), NA_real_, as.numeric(.))),
+    persons_per_bedroom = if_else(bedrooms > 0, household_size / bedrooms, NA_real_),
+    district = case_when(
+      district_id %in% 1:3 ~ "Castries",
+      district_id == 4     ~ "Anse-la-Raye",
+      district_id == 5     ~ "Canaries",
+      district_id == 6     ~ "Soufriere",
+      district_id == 7     ~ "Choiseul",
+      district_id == 8     ~ "Laborie",
+      district_id == 9     ~ "Vieux Fort",
+      district_id == 10    ~ "Micoud",
+      district_id == 11    ~ "Dennery",
+      district_id == 12    ~ "Gros Islet",
+      TRUE ~ NA_character_
+    ),
+    owner    = if_else(tenure %in% c(1, 2), 1, 0),
+    renter   = if_else(tenure %in% c(3, 4), 1, 0),
+    rentfree = if_else(tenure == 5, 1, 0)
+  ) |>
+  filter(!is.na(district))
+
+# ---- District summaries ----
+# Filter to non-NA weights before summarising: the person-household merged
+# files assign weights only to the household head record; non-head person
+# rows have NA weights and would silently poison weighted.mean otherwise.
+district_2022 <- hh_2022 |>
+  filter(!is.na(hh_weight)) |>
+  group_by(district) |>
+  summarise(
+    renter_rate_22   = weighted.mean(renter,   hh_weight, na.rm = TRUE),
+    owner_rate_22    = weighted.mean(owner,    hh_weight, na.rm = TRUE),
+    rentfree_rate_22 = weighted.mean(rentfree, hh_weight, na.rm = TRUE),
+    hh_size_22       = weighted.mean(household_size, hh_weight, na.rm = TRUE),
+    ppbr_22          = weighted.mean(persons_per_bedroom, hh_weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+district_2010 <- hh_2010 |>
+  filter(!is.na(hh_weight)) |>
+  group_by(district) |>
+  summarise(
+    renter_rate_10   = weighted.mean(renter,   hh_weight, na.rm = TRUE),
+    owner_rate_10    = weighted.mean(owner,    hh_weight, na.rm = TRUE),
+    rentfree_rate_10 = weighted.mean(rentfree, hh_weight, na.rm = TRUE),
+    hh_size_10       = weighted.mean(household_size, hh_weight, na.rm = TRUE),
+    ppbr_10          = weighted.mean(persons_per_bedroom, hh_weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ---- TPI: Attraction concentration shares (OSM-based) ----
+tpi_data <- read.csv("TPI_v2_attraction_concentration.csv") |>
+  select(district, tpi = tpi_v2)
+
+# ---- National shift: Airbnb-era growth, pandemic years excluded ----
+# Pre-Airbnb average (2010–2014) vs post-launch average (2015–2019, 2022)
+# 2020–2021 excluded: COVID collapsed arrivals 70%, distorting a simple mean
+tourism_raw <- read.csv("Selected-Tourism-Statistics.csv",
+                        header = FALSE, stringsAsFactors = FALSE)
+stay_annual <- tourism_raw |>
+  setNames(paste0("V", seq_len(ncol(tourism_raw)))) |>
+  filter(grepl("Stay-Over Arrivals", V2, fixed = TRUE)) |>
+  mutate(
+    year   = as.integer(substr(trimws(V5), 1, 4)),
+    amount = as.numeric(gsub(",", "", trimws(V6)))
+  ) |>
+  filter(!is.na(year), !is.na(amount)) |>
+  group_by(year) |>
+  summarise(arrivals = sum(amount), .groups = "drop")
+
+pre_avg        <- mean(stay_annual$arrivals[stay_annual$year %in% 2010:2014])
+post_avg       <- mean(stay_annual$arrivals[stay_annual$year %in% c(2015:2019, 2022)])
+national_shift <- (post_avg - pre_avg) / pre_avg   # ~0.187
+
+# ---- Google Trends shift (Airbnb worldwide) ----
+gt_raw   <- read.csv("google_trends_Airbnb.csv", header = TRUE, stringsAsFactors = FALSE)
+colnames(gt_raw) <- c("date", "index")
+gt_raw$year  <- as.integer(substr(trimws(gt_raw$date), 1, 4))
+gt_raw$index <- suppressWarnings(as.numeric(gt_raw$index))
+gt_annual <- aggregate(index ~ year,
+                       data = gt_raw[!is.na(gt_raw$year) & !is.na(gt_raw$index), ],
+                       FUN  = mean)
+
+gt_pre   <- mean(gt_annual$index[gt_annual$year %in% 2010:2014])
+gt_post  <- mean(gt_annual$index[gt_annual$year %in% c(2015:2019, 2022)])
+gt_shift <- (gt_post - gt_pre) / gt_pre   # ~7.32 (732% growth)
+
+# Combined shift: geometric mean of Airbnb GT and arrivals (both positive)
+combined_shift <- sqrt(gt_shift * national_shift)   # ~1.17
+
+# ---- Master district panel ----
+district_wide <- district_2010 |>
+  left_join(district_2022, by = "district") |>
+  left_join(tpi_data,      by = "district") |>
+  mutate(
+    d_renter   = (renter_rate_22  - renter_rate_10)  * 100,
+    d_owner    = (owner_rate_22   - owner_rate_10)   * 100,
+    d_hh_size  = hh_size_22  - hh_size_10,
+    d_ppbr     = ppbr_22     - ppbr_10,
+    tourism_tier = case_when(
+      tpi >= 0.20            ~ "High",
+      tpi >= 0.09            ~ "Medium",
+      TRUE                   ~ "Low"
+    )
+  )
+
+# ---- Long panel for DiD ----
+panel <- bind_rows(
+  district_2010 |>
+    left_join(tpi_data, by = "district") |>
+    mutate(year = 2010, post = 0,
+           renter_rate   = renter_rate_10,
+           owner_rate    = owner_rate_10,
+           rentfree_rate = rentfree_rate_10,
+           hh_size       = hh_size_10,
+           ppbr          = ppbr_10),
+  district_2022 |>
+    left_join(tpi_data, by = "district") |>
+    mutate(year = 2022, post = 1,
+           renter_rate   = renter_rate_22,
+           owner_rate    = owner_rate_22,
+           rentfree_rate = rentfree_rate_22,
+           hh_size       = hh_size_22,
+           ppbr          = ppbr_22)
+) |>
+  mutate(
+    tpi_post          = tpi * national_shift * post,
+    tpi_post_gt       = tpi * gt_shift       * post,
+    tpi_post_combined = tpi * combined_shift  * post
+  )
+```
+
+# Data and Methods
+
+## Data Sources
+
+```{r table-datasources}
+tibble(
+  Feature              = c("Source", "Coverage", "Unit of observation",
+                            "Sample (households)", "Key tenure variable",
+                            "Household weight", "Rent variable"),
+  `2010 Census`        = c("CSO Saint Lucia person–household merged file",
+                            "Full population census",
+                            "Person (merged with household record)",
+                            "50,241", "H13_OWN (9 categories)",
+                            "HWEIGHT", "Not collected"),
+  `2022 Census`        = c("CSO Saint Lucia PersonHHoldMerge (Anon.)",
+                            "Full population census",
+                            "Person (merged with household record)",
+                            "50,588", "h2_3a (12 categories)",
+                            "HHLD_WEIGHT", "h2_3b1 (EC$/month)")
+) |>
+  kable(caption = "Data source overview", format = "pandoc")
+```
+
+The primary data source is the Saint Lucia Population and Housing Census, with complete waves in 2010 (pre-Airbnb) and 2022 (post-Airbnb). Microdata was obtained from the Central Statistical Office and aggregated to the district level. Outcomes include renter rate, owner rate, rent-free rate,
+average household size, and persons per bedroom, all weighted using survey weights. The **Tourism Proximity Index (TPI)** (the Bartik IV share) is constructed from OpenStreetMap (OSM) point-of-interest data queried via the Overpass API (May 2026). 
+All tourism, historic, beach, and dive-centre features within Saint Lucia's boundaries are extracted (411 raw features), classified into seven types, and assigned weights reflecting their anchor importance: hotels/resorts (3), formal attractions and beaches (2), viewpoints and historic sites (1.5), and guesthouses and dive centres (1). Features
+are assigned to districts via point-in-polygon using GADM v4.1 boundaries; coastal features on polygon edges are assigned to the nearest district centroid. Each district's TPI share equals its total weighted score divided by the island-wide total (379 classified features; island total weighted score = 701).
+
+Although the OSM snapshot is dated May 2026, the TPI shares are argued to reflect a
+**predetermined spatial distribution** of tourism activity. The bulk of the attraction weight derives from features whose geographic location is fixed and could not have been caused by Airbnb's post-2014 expansion: beaches and coastline (22% of weighted features), natural landmarks including the Pitons UNESCO World Heritage Site and Sulphur Springs
+(captured under viewpoints and natural features), and colonial-era historic sites and forts.
+Major hotel and resort infrastructure, which accounts for the largest weight category, was
+similarly established well before Airbnb entered Saint Lucia; the island's resort cluster
+geography (concentrated in Gros Islet/Rodney Bay, Soufriere, and Castries) has been
+stable since at least the 1990s and is documented in SLTA records from 2010. The 2026
+OSM snapshot therefore captures the underlying structural geography of tourism exposure,
+not a post-treatment equilibrium. A robustness check using 2010 SLTA hotel-room counts
+as an alternative share will be reported in the final thesis.
+
+**District-level short-term rental
+(STR) listing counts (2014-2022), the endogenous variable required for the first stage and
+2SLS, have been formally requested from the Central Statistical Office of Saint Lucia and the
+SLTA; receipt is pending.** In the interim, this memo reports reduced-form estimates only.
+
+## Variable Construction
+
+**Tenure status** is harmonised across years:
+
+| Category       | 2010 (H13_OWN)                  | 2022 (h2_3a)                          |
+|----------------|----------------------------------|---------------------------------------|
+| Owner-occupied | 1 (Owned fully), 2 (Mortgage)   | 1–3 (Owned fully), 4–6 (Mortgage)    |
+| Renter         | 3 (Private), 4 (Govt)           | 7 (Private), 8 (Govt)                |
+| Rent-free      | 5                                | 9                                     |
+
+**Household crowding** (persons per bedroom) uses `AVGPERS_PER_BEDROOM` in 2010 and
+`Npersons / h2_15` in 2022. **District harmonisation:** Castries sub-districts (codes 1–3 in both
+years) are collapsed to a single unit using `DISTRICTB` (2010) and `DISTRICT_ID` (2022).
+
+## Identification Strategy: Bartik IV
+
+The study uses a **Bartik (shift-share) instrumental variable** design. Airbnb's national expansion after 2014 was a common shock to all districts, but its local impact was proportional to each district's pre-existing share of Saint Lucia's tourism activity. This cross-district heterogeneity in pre-determined tourism exposure is the source of identifying variation.
+
+The Bartik instrument is:
+
+$$Z_{dt} = \underbrace{TPI_d}_{\text{Share}} \times \underbrace{\Delta g_t^{\text{national}}}_{\text{Shift}}$$
+
+where $TPI_d$ is the *Tourism Proximity Index* (district $d$'s share of the island's weighted
+tourism attraction stock, constructed from OSM data, so $\sum_d TPI_d = 1$), and
+$\Delta g^{\text{national}}$ is the island-wide growth in stay-over visitor arrivals between the pre-Airbnb and Airbnb-era periods, a common national shock affecting all districts equally.
+With two census waves this shift is a scalar (Source: CSO Saint Lucia Tourism Statistics).
+
+**Data source and construction of the shift.** The shift is drawn from the CSO Saint Lucia Tourism Statistics (`Selected-Tourism-Statistics.csv`), which provides annual stay-over arrival totals from 2010 to 2025. Rather than a simple 2010-to-2022 endpoint comparison (which conflates pre-Airbnb tourism trends with the platform-era shock), the shift is constructed as the growth from the pre-launch average (2010–2014) to the post-launch average (2015–2019 and 2022). The pandemic years 2020–2021 are excluded because COVID-19 collapsed arrivals by roughly 70%, which would otherwise mechanically suppress the post-period mean and understate the Airbnb-era expansion.
+
+| Year | Stay-Over Arrivals | Period |
+|------|-------------------:|--------|
+| 2010 | 305,937 | Pre-Airbnb |
+| 2011 | 312,404 | Pre-Airbnb |
+| 2012 | 306,801 | Pre-Airbnb |
+| 2013 | 318,626 | Pre-Airbnb |
+| 2014 | 338,158 | Pre-Airbnb |
+| 2015 | 344,908 | Post-launch |
+| 2016 | 347,872 | Post-launch |
+| 2017 | 386,127 | Post-launch |
+| 2018 | 394,780 | Post-launch |
+| 2019 | 423,736 | Post-launch |
+| 2020 | 130,699 | *Excluded (COVID-19)* |
+| 2021 | 199,347 | *Excluded (COVID-19)* |
+| 2022 | 356,237 | Post-launch |
+
+$$\bar{A}_{\text{pre}} = \frac{305{,}937 + 312{,}404 + 306{,}801 + 318{,}626 + 338{,}158}{5} = 316{,}385$$
+
+$$\bar{A}_{\text{post}} = \frac{344{,}908 + 347{,}872 + 386{,}127 + 394{,}780 + 423{,}736 + 356{,}237}{6} = 375{,}610$$
+
+$$\Delta g^{\text{national}} = \frac{375{,}610 - 316{,}385}{316{,}385} = 0.187$$
+
+This 18.7% expansion enters the instrument as a single scalar applied identically to every district. Because it captures aggregate island-wide demand rather than anything particular to a given district's housing market, it is plausibly exogenous to district-level outcomes. The practical effect of multiplying by this shift is to convert each district's TPI share into a predicted exposure level: Gros Islet's predicted exposure ($0.264 \times 0.187 \approx 0.049$) is roughly eight times larger than Micoud's ($0.031 \times 0.187 \approx 0.006$), with the entire difference driven by pre-existing geographic positioning rather than any post-2010 endogenous choice.
+
+**Reduced form** (estimated currently, pending listing data):
+
+$$Y_{dt} = \alpha + \beta^{RF}(TPI_d \times \Delta g^{\text{national}} \times \text{Post}_t) + \gamma_d + \delta_t + \varepsilon_{dt}$$
+
+**First stage** (to be estimated once district-level STR listing counts are obtained):
+
+$$\text{STR}_{dt} = \alpha + \pi(TPI_d \times \Delta g^{\text{national}} \times \text{Post}_t) + \gamma_d + \delta_t + u_{dt}$$
+
+**Second stage (2SLS):** $\beta^{IV} = \beta^{RF} / \hat{\pi}$, the causal effect of STR
+penetration on housing outcomes. District fixed effects $\gamma_d$ absorb time-invariant district
+characteristics; year fixed effects $\delta_t$ absorb common trends. Standard errors are clustered
+at the district level.
+
+> **Data availability note:** District-level STR listing counts required for the first stage
+> ($\hat{\pi}$) and 2SLS ($\beta^{IV}$) have been formally requested from the Central Statistical
+> Office of Saint Lucia but have not yet been received. All regression results below are therefore
+> **reduced-form estimates** ($\beta^{RF}$). Full 2SLS estimates will be reported once listing
+> data are received.
+
+The exclusion restriction requires $TPI_d$ to affect housing outcomes *only through*
+Airbnb-driven STR activity. The three most plausible threats are: (1) **concurrent hotel expansion**
+in high-TPI districts, addressed by controlling for SLTA hotel room growth (2010–2022);
+(2) **pre-existing spatial trends**, tested via a pre-period placebo regression over 2001–2010
+where $\hat{\beta}^{RF} \approx 0$ is required; and (3) **endogeneity of the OSM-based share**,
+mitigated by the argument that the TPI reflects fixed geographic and structural features
+predating Airbnb (see Data Sources), with a 2010 SLTA hotel-room share used as a robustness check.
+
+## Figure 1: TPI Shares by District, Saint Lucia
+
+```{r fig-tpi-map, fig.cap="Figure 1. Tourism Proximity Index (TPI) by District, Saint Lucia. Each district's share of the island's weighted tourism attraction stock, the Bartik IV share used to instrument for Airbnb penetration. Gros Islet (26.4%), Soufrière (22.6%), and Castries (17.5%) account for roughly two-thirds of all attraction weight. Source: OpenStreetMap contributors via Overpass API (May 2026); GADM v4.1 boundaries.", fig.width=5, fig.height=6.5, fig.align='center'}
+knitr::include_graphics("TPI_Map_Saint_Lucia_v2.png")
+```
+
+Figure 1 maps the cross-district variation in TPI that drives identification. Gros Islet, Soufrière, and Castries together hold roughly 67% of the island's weighted attraction stock, providing the concentrated spatial contrast needed to trace Airbnb's differential impact on housing outcomes.
+
+\newpage
+# Descriptive Statistics
+
+## Table 1: District-Level Housing Outcomes, 2010 and 2022
+
+```{r table-district-outcomes}
+district_wide |>
+  arrange(desc(tpi)) |>
+  mutate(
+    across(c(renter_rate_10, renter_rate_22, owner_rate_10, owner_rate_22),
+           ~ round(. * 100, 1)),
+    tpi      = round(tpi, 3),
+    d_renter = round(d_renter, 1),
+    d_owner  = round(d_owner,  1),
+    across(c(hh_size_10, hh_size_22, d_hh_size), ~ round(., 2))
+  ) |>
+  select(district, tpi,
+         renter_rate_10, renter_rate_22, d_renter,
+         owner_rate_10,  owner_rate_22,  d_owner,
+         hh_size_10,     hh_size_22,     d_hh_size) |>
+  kable(
+    col.names = c("District", "TPI",
+                  "Renter 2010 (%)", "Renter 2022 (%)", "Δ Renter (pp)",
+                  "Owner 2010 (%)",  "Owner 2022 (%)",  "Δ Owner (pp)",
+                  "HH Size 2010",    "HH Size 2022",    "Δ HH Size"),
+    caption = "Table 1. District-level housing outcomes, Saint Lucia 2010–2022. Districts ordered by pre-Airbnb tourism intensity (high to low). pp = percentage points. HH = household. Source: CSO Saint Lucia Population and Housing Census 2010, 2022.",
+    format = "pandoc"
+  )
+```
+
+The raw data reveal a clear gradient: **high-tourism districts show the sharpest declines in
+renter-occupied tenure and the largest increases in owner-occupancy** over the 2010-2022 period.
+This pattern is consistent with a displacement and sorting mechanism: STR conversion removes
+rental units from the long-term market, pricing out existing renters who leave the district,
+while rising property values in tourism-intensive areas attract wealthier owner-occupiers into
+vacated stock. The affordability cost falls on displaced renters rather than appearing as a
+higher renter share in the affected districts themselves.
+
+## Figure 2: Renter Rates by District, 2010 vs. 2022
+
+```{r fig-renter-rates, fig.cap="Figure 2. Renter Rate by District, 2010 vs. 2022. Districts ordered by TPI (Bartik share, bottom = highest TPI). Source: CSO Saint Lucia Population and Housing Census 2010, 2022. Weighted district-level estimates."}
+district_wide |>
+  arrange(tpi) |>
+  mutate(district = factor(district, levels = district)) |>
+  select(district, tpi, renter_rate_10, renter_rate_22) |>
+  pivot_longer(c(renter_rate_10, renter_rate_22),
+               names_to = "year",
+               values_to = "renter_rate") |>
+  mutate(
+    year  = if_else(year == "renter_rate_10", "2010", "2022"),
+    label = scales::percent(renter_rate, accuracy = 0.1)
+  ) |>
+  ggplot(aes(x = renter_rate, y = district, fill = year)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_text(aes(label = label),
+            position = position_dodge(width = 0.7),
+            hjust = -0.1, size = 2.5) +
+  scale_x_continuous(labels = scales::percent,
+                     expand = expansion(mult = c(0, 0.15))) +
+  scale_fill_manual(values = c("2010" = "#D7191C", "2022" = "#FDAE61"),
+                    name = "Census Year") +
+  labs(
+    title    = "Figure 2. Renter Rate by District, 2010 vs. 2022",
+    subtitle = "Districts ordered by TPI (Bartik share, bottom = highest TPI)",
+    x = "Share of Households Renting", y = NULL,
+    caption  = "Source: CSO Saint Lucia Population and Housing Census 2010, 2022.\nWeighted district-level estimates."
+  )
+```
+
+Figure 2 shows that renter rates fell between 2010 and 2022 in most high-tourism districts, with
+the steepest declines in **Gros Islet (-3.7 pp), Castries (-7.0 pp), and Soufriere (-4.6 pp)**,
+the three districts with the highest TPI. Some lower-TPI districts such as Canaries (+5.1 pp)
+show renter rate increases, consistent with displaced renters relocating to more affordable
+peripheral areas. Together these shifts provide the first visual evidence of the displacement
+and sorting mechanism: high-tourism districts lost renters while gaining owner-occupiers, and
+some of that rental demand appears to have been absorbed by lower-exposure districts.
+
+# Preliminary Regression Results
+
+## Figure 3: Tourism Intensity and the Change in Renter Rate, 2010–2022
+
+```{r fig-scatter-renter, fig.cap="Figure 3. Pre-Airbnb Tourism Intensity vs. Change in Renter Rate, 2010–2022. Each point is one district; regression line shows OLS trend across all 10 districts. High-tourism districts show the steepest declines in renter-occupied tenure, consistent with short-term rental conversion displacing existing renters. Source: CSO Saint Lucia Population and Housing Census 2010, 2022; OpenStreetMap / GADM v4.1 (TPI)."}
+district_wide |>
+  mutate(tourism_tier = factor(tourism_tier, levels = c("High", "Medium", "Low"))) |>
+  ggplot(aes(x = tpi, y = d_renter, label = district,
+             color = tourism_tier)) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "grey50", fill = "grey85", linewidth = 0.7) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text_repel(size = 2.8, max.overlaps = 12, show.legend = FALSE) +
+  scale_color_manual(values = c("High" = "#D7191C", "Medium" = "#FDAE61", "Low" = "#2C7BB6"),
+                     name = "Tourism Tier") +
+  labs(
+    title    = "Figure 3. Pre–Airbnb Tourism Intensity vs. Change in Renter Rate",
+    subtitle = "Each point is one district; negative slope consistent with STR displacement of renters",
+    x        = "Tourism Proximity Index (TPI, attraction concentration share)",
+    y        = "Change in Renter Rate 2010–2022 (pct. points)",
+    caption  = "Source: CSO Saint Lucia Population and Housing Census 2010, 2022;\nOpenStreetMap / GADM v4.1 (TPI)."
+  )
+```
+
+Figure 3 presents the **key reduced-form relationship**: the change in renter rate between 2010 and
+2022 plotted against pre-Airbnb tourism intensity. The negative slope indicates that
+**high-tourism districts experienced the largest declines in renter-occupied tenure**, the opposite
+of a pure rent-inflation story, but consistent with the STR conversion mechanism: as Airbnb
+expanded after 2014, landlords in tourism-intensive districts converted long-term rental units into
+short-term listings, reducing the available stock of rental housing and displacing existing renters
+out of those districts entirely. Under this interpretation, the relevant outcome is the *loss* of
+accessible rental supply rather than an increase in the renter share.
+
+## Table 2: Reduced-Form Regression Results
+
+Table 2 formalises the scatter-plot pattern by running three variants of the panel reduced-form specification $Y_{dt} = \alpha + \beta(TPI_d \times \Delta g^{\text{shift}} \times \text{Post}_t) + \gamma_d + \delta_t + \varepsilon_{dt}$ with district and year fixed effects. The three models differ only in how the Bartik shift is constructed:
+
+- **Model 1 (GT Shift):** $\Delta g$ is the proportional growth in worldwide Google Trends search interest for "Airbnb" between the pre-launch period (2010–2014 average) and the Airbnb era (2015–2019 and 2022 average, pandemic years excluded). This proxies platform adoption and supply-side awareness.
+- **Model 2 (Arrivals Shift):** $\Delta g = 0.187$, the growth in Saint Lucia's national stay-over arrivals between the same two periods (see Section 3.2). This proxies tourism demand pressure.
+- **Model 3 (Combined):** $\Delta g$ is the geometric mean of Shifts 1 and 2 ($\sqrt{7.32 \times 0.187} \approx 1.17$), capturing the joint effect of platform adoption and demand-side growth. The geometric mean is appropriate because the two forces are multiplicatively complementary: STR displacement is greatest when both platform awareness and tourist demand are simultaneously high.
+
+Since the shift is a national scalar, all three instruments are proportional to $TPI_d \times \text{Post}_t$. The t-statistics are therefore identical across models; what differs is the scale of $\hat{\beta}$, which reflects the unit of the underlying shift. All three models are fully sourced and will render without any additional downloads.
+
+```{r tbl-regressions, message=FALSE, warning=FALSE}
+library(fixest)
+library(modelsummary)
+
+m1 <- feols(renter_rate ~ tpi_post_gt       | district + year,
+            data = panel, vcov = "hetero")
+m2 <- feols(renter_rate ~ tpi_post          | district + year,
+            data = panel, vcov = "hetero")
+m3 <- feols(renter_rate ~ tpi_post_combined | district + year,
+            data = panel, vcov = "hetero")
+
+modelsummary(
+  list("(1) GT Shift" = m1, "(2) Arrivals Shift" = m2, "(3) Combined" = m3),
+  output   = "markdown",
+  stars    = c("*" = 0.10, "**" = 0.05, "***" = 0.01),
+  coef_rename = c(
+    tpi_post_gt       = "TPI × Shift × Post",
+    tpi_post          = "TPI × Shift × Post",
+    tpi_post_combined = "TPI × Shift × Post"
+  ),
+  gof_map  = list(
+    list(raw = "nobs",          clean = "N",        fmt = 0),
+    list(raw = "r.squared",     clean = "R²",       fmt = 3),
+    list(raw = "adj.r.squared", clean = "Adj. R²",  fmt = 3)
+  ),
+  title   = "Table 2. Reduced-Form Estimates: TPI Exposure and Renter Rate (District FE + Year FE)"
+)
+```
+
+*Notes:* Outcome: household renter-occupancy share (proportion), pooled 2010 and 2022. Shift 1: Google Trends "Airbnb" worldwide index; pre avg = 7.8, post avg = 64.5; Δg = 7.32. Shift 2: National stay-over arrivals growth, CSO Saint Lucia; Δg = 0.187. Shift 3: Geometric mean of Shifts 1 and 2; Δg = 1.17. Pre-period: 2010–2014 average. Post-period: 2015–2019 and 2022 average (2020–2021 excluded, COVID-19). Heteroskedasticity-robust standard errors. \* p\<0.10 \*\* p\<0.05 \*\*\* p\<0.01.
+
+## Figure 4: Monthly Rent by District, 2022 (Cross-Sectional)
+
+```{r fig-rent-2022, fig.cap="Figure 4. Median Monthly Rent by District, 2022. Among renter-occupied households only; districts ordered by median rent. Source: CSO Saint Lucia Population and Housing Census 2022. N renters reporting valid rent: 5,791."}
+hh_2022 |>
+  filter(tenure %in% 7:8,
+         !is.na(monthly_rent),
+         monthly_rent > 0, monthly_rent < 99999) |>
+  left_join(district_wide |> select(district, tourism_tier),
+            by = "district") |>
+  mutate(tourism_tier = factor(tourism_tier, levels = c("High", "Medium", "Low"))) |>
+  group_by(district, tourism_tier) |>
+  summarise(median_rent = median(rep(monthly_rent, times = round(hh_weight))),
+            .groups = "drop") |>
+  arrange(median_rent) |>
+  mutate(district = factor(district, levels = district),
+         label    = paste0("EC$", format(round(median_rent), big.mark = ","))) |>
+  ggplot(aes(x = median_rent, y = district, fill = tourism_tier)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = label), hjust = -0.1, size = 2.8) +
+  scale_x_continuous(labels = dollar_format(prefix = "EC$"),
+                     expand = expansion(mult = c(0, 0.20))) +
+  scale_fill_manual(values = c("High" = "#D7191C", "Medium" = "#FDAE61", "Low" = "#2C7BB6"),
+                    name = "Tourism Tier") +
+  labs(
+    title   = "Figure 4. Median Monthly Rent by District, 2022",
+    subtitle = "Among renter-occupied households only; districts ordered by median rent",
+    x       = "Median Monthly Rent (EC$)", y = NULL,
+    caption = "Source: CSO Saint Lucia Population and Housing Census 2022.\nN renters reporting valid rent: 5,791."
+  )
+```
+
+Although a comparable rent variable is unavailable in the 2010 census, the 2022 cross-section in
+Figure 4 documents substantial spatial variation in rent levels. High-tourism districts command the
+highest median rents, consistent with a long-run market in which short-term rental platforms have
+pushed up the floor price for rental accommodation.
+
+# Conclusion and Policy Recommendations
+
+## Summary of Preliminary Findings
+
+Taken together, the descriptive and regression evidence from the 2010 and 2022 Saint Lucia censuses
+tells a consistent story:
+
+1. **Renter rates fell most sharply in high-tourism districts.** Gros Islet, Soufriere, and
+   Castries — the three highest-TPI districts — all recorded significant declines in
+   renter-occupied tenure between 2010 and 2022 (-3.7, -4.6, and -7.0 percentage points
+   respectively), while some lower-TPI districts absorbed modest renter rate increases,
+   consistent with outward displacement of renters from tourism-intensive areas.
+
+2. **Homeownership rose in tourism-intensive districts.** Owner-occupancy increased in all three
+   high-TPI districts (Gros Islet +2.4 pp, Soufriere +5.2 pp, Castries +4.1 pp), pointing to a
+   sorting mechanism: as rental stock was converted to short-term use and property values rose,
+   remaining and incoming residents were increasingly owner-occupiers, while lower-income renters
+   exited.
+
+3. **Rents are highest precisely where renters are fewest.** The 2022 cross-section confirms that
+   the renters who remain in high-tourism districts face the island's highest median rents,
+   indicating that STR conversion has tightened rental supply and pushed up the price floor for
+   whatever long-term rental stock remains.
+
+4. **Household crowding patterns warrant further investigation.** Changes in persons per bedroom
+   in high-tourism districts may reflect consolidation among cost-burdened households, though
+   this requires controlled estimation to separate from demographic trends.

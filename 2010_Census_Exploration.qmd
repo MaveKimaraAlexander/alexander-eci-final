@@ -1,0 +1,661 @@
+---
+title: "2010 Census Data — Exploration & Diagnosis"
+subtitle: "Saint Lucia Housing Thesis | Pre-Treatment Baseline"
+author: "Mave Kimara Alexander"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    number-sections: true
+    theme: flatly
+    code-fold: true
+    code-tools: true
+    df-print: kable
+    fig-width: 8
+    fig-height: 5
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+```{r setup}
+#| label: setup
+#| include: false
+
+library(haven)
+library(tidyverse)
+library(labelled)
+library(kableExtra)
+library(scales)
+library(ggrepel)
+
+theme_set(
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    plot.caption  = element_text(size = 8,  color = "grey55"),
+    axis.text     = element_text(size = 9),
+    legend.position = "bottom",
+    legend.text   = element_text(size = 9)
+  )
+)
+
+caption_2010 <- "Source: Saint Lucia Population and Housing Census 2010"
+```
+
+---
+
+::: {.callout-note}
+## Why does the 2010 census matter?
+
+The 2010 census is the **pre-treatment baseline** for your entire thesis.
+Without it, you only have a cross-sectional snapshot of 2022 — 
+you cannot prove that *anything caused anything*.
+
+With the 2010 data you can:
+
+1. **Compute change** — ∆rental share, ∆homeownership, ∆overcrowding per district (2010→2022)
+2. **Build the pre-treatment Hosting Suitability Index** — the key instrument in your identification strategy (districts suited for Airbnb *before* Airbnb existed)
+3. **Check parallel trends** — verify that high- and low-suitability districts were not already diverging before the 2014 shock
+4. **Run the DiD** — regress outcome changes on pre-treatment suitability interacted with the post-treatment indicator
+
+The NA problems in the current code break step 2. This document diagnoses and fixes them.
+:::
+
+---
+
+# Loading the 2010 Data
+
+```{r load}
+Raw_Census_Data_2010 <- read_sav("person_house_merged.sav")
+
+cat("Rows:", nrow(Raw_Census_Data_2010), "\n")
+cat("Columns:", ncol(Raw_Census_Data_2010), "\n")
+```
+
+---
+
+# Diagnosing the NA Problem
+
+The 2010 Housing Quality table shows `NA` for piped water, improved toilet, durable walls,
+and durable roof across **every district**. Electricity is fine. The NA-cleaning step converts
+value `9` to `NA` — but value `9` may be a **legitimate category** for some variables.
+Let's check the raw distributions.
+
+## Water Source (H18_WATER)
+
+```{r diag-water}
+Raw_Census_Data_2010 |>
+  filter(!is.na(H18_WATER)) |>
+  count(H18_WATER) |>
+  mutate(
+    label    = as.character(labelled::val_label(Raw_Census_Data_2010$H18_WATER[1])),
+    value    = as.numeric(H18_WATER),
+    pct      = n / sum(n)
+  ) |>
+  mutate(value_labels = sapply(value, function(v) {
+    lbls <- labelled::val_labels(Raw_Census_Data_2010$H18_WATER)
+    nm   <- names(lbls)[lbls == v]
+    if (length(nm) == 0) paste0("Code ", v, " (no label)") else nm
+  })) |>
+  select(H18_WATER, value_labels, n, pct) |>
+  mutate(pct = percent(pct, accuracy = 0.1)) |>
+  kbl(col.names = c("Code", "Label", "Count", "Share"),
+      caption = "Raw distribution of H18_WATER (water source) — 2010") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+::: {.callout-warning}
+If value `9` = "Not Stated" and is common, the NA-cleaning line
+`if_else(. %in% c(..., 9), NA_real_, ...)` converts a real (non-missing)
+category to NA — breaking any indicator computed from it.
+The fix is to **not** treat `9` as missing for these variables, or to
+recode it as `0` in the quality indicator (i.e. "does not have piped water").
+:::
+
+## Toilet Type (H20_TOILET)
+
+```{r diag-toilet}
+Raw_Census_Data_2010 |>
+  filter(!is.na(H20_TOILET)) |>
+  count(H20_TOILET) |>
+  mutate(value_labels = sapply(as.numeric(H20_TOILET), function(v) {
+    lbls <- labelled::val_labels(Raw_Census_Data_2010$H20_TOILET)
+    nm   <- names(lbls)[lbls == v]
+    if (length(nm) == 0) paste0("Code ", v, " (no label)") else nm
+  })) |>
+  mutate(pct = percent(n / sum(n), accuracy = 0.1)) |>
+  select(H20_TOILET, value_labels, n, pct) |>
+  kbl(col.names = c("Code", "Label", "Count", "Share"),
+      caption = "Raw distribution of H20_TOILET — 2010") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Wall Material (H15_WALLS)
+
+```{r diag-walls}
+Raw_Census_Data_2010 |>
+  filter(!is.na(H15_WALLS)) |>
+  count(H15_WALLS) |>
+  mutate(value_labels = sapply(as.numeric(H15_WALLS), function(v) {
+    lbls <- labelled::val_labels(Raw_Census_Data_2010$H15_WALLS)
+    nm   <- names(lbls)[lbls == v]
+    if (length(nm) == 0) paste0("Code ", v, " (no label)") else nm
+  })) |>
+  mutate(pct = percent(n / sum(n), accuracy = 0.1)) |>
+  select(H15_WALLS, value_labels, n, pct) |>
+  kbl(col.names = c("Code", "Label", "Count", "Share"),
+      caption = "Raw distribution of H15_WALLS — 2010") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Roof Material (H16_ROOF)
+
+```{r diag-roof}
+Raw_Census_Data_2010 |>
+  filter(!is.na(H16_ROOF)) |>
+  count(H16_ROOF) |>
+  mutate(value_labels = sapply(as.numeric(H16_ROOF), function(v) {
+    lbls <- labelled::val_labels(Raw_Census_Data_2010$H16_ROOF)
+    nm   <- names(lbls)[lbls == v]
+    if (length(nm) == 0) paste0("Code ", v, " (no label)") else nm
+  })) |>
+  mutate(pct = percent(n / sum(n), accuracy = 0.1)) |>
+  select(H16_ROOF, value_labels, n, pct) |>
+  kbl(col.names = c("Code", "Label", "Count", "Share"),
+      caption = "Raw distribution of H16_ROOF — 2010") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Lighting Source (H21_LIGHTING) — should be fine
+
+```{r diag-lighting}
+Raw_Census_Data_2010 |>
+  filter(!is.na(H21_LIGHTING)) |>
+  count(H21_LIGHTING) |>
+  mutate(value_labels = sapply(as.numeric(H21_LIGHTING), function(v) {
+    lbls <- labelled::val_labels(Raw_Census_Data_2010$H21_LIGHTING)
+    nm   <- names(lbls)[lbls == v]
+    if (length(nm) == 0) paste0("Code ", v, " (no label)") else nm
+  })) |>
+  mutate(pct = percent(n / sum(n), accuracy = 0.1)) |>
+  select(H21_LIGHTING, value_labels, n, pct) |>
+  kbl(col.names = c("Code", "Label", "Count", "Share"),
+      caption = "Raw distribution of H21_LIGHTING — 2010") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+---
+
+# Fixed Working Table
+
+::: {.callout-tip}
+## Fix applied
+The corrected NA cleaning only sets **true system missing** codes
+(`-999999999`, `999999999`) to `NA`. Values like `9` ("Not Stated") or
+`99` ("Not Stated") are treated as legitimate responses — specifically, a
+`9` in water source means "does not have piped water" and should result
+in `piped_water = 0`, not a dropped row.
+:::
+
+```{r working-table}
+Raw_Census_Data_2010 <- Raw_Census_Data_2010 |>
+  mutate(household_id_2010 = paste(DISTRICT, ED, HH, sep = "_"))
+
+Thesis_Working_Data_2010 <- Raw_Census_Data_2010 |>
+  distinct(household_id_2010, .keep_all = TRUE) |>
+  select(
+    household_id_2010,
+    DISTRICT, poldist,
+    NPERS,
+    H11_TYPE, H13_OWN,
+    H15_WALLS, H16_ROOF, H17_YR_BUILT,
+    H18_WATER, H20_TOILET, H21_LIGHTING,
+    H23_ROOMS, H24_BEDROOMS,
+    H30_VEHICLES,
+    HWEIGHT
+  ) |>
+  rename(
+    household_id    = household_id_2010,
+    district_raw    = DISTRICT,
+    constituency    = poldist,
+    household_size  = NPERS,
+    building_type   = H11_TYPE,
+    tenure_status   = H13_OWN,
+    wall_material   = H15_WALLS,
+    roof_material   = H16_ROOF,
+    year_built      = H17_YR_BUILT,
+    water_source    = H18_WATER,
+    toilet_type     = H20_TOILET,
+    lighting_source = H21_LIGHTING,
+    rooms           = H23_ROOMS,
+    bedrooms        = H24_BEDROOMS,
+    vehicles_owned  = H30_VEHICLES,
+    household_weight = HWEIGHT
+  ) |>
+  zap_labels() |>
+  mutate(
+    # District mapping
+    district = case_when(
+      district_raw == 1  ~ "Castries 1",
+      district_raw == 2  ~ "Castries 2",
+      district_raw == 3  ~ "Castries 3",
+      district_raw == 4  ~ "Anse La Raye",
+      district_raw == 5  ~ "Canaries",
+      district_raw == 6  ~ "Soufriere",
+      district_raw == 7  ~ "Choiseul",
+      district_raw == 8  ~ "Laborie",
+      district_raw == 9  ~ "Vieux Fort",
+      district_raw == 10 ~ "Micoud",
+      district_raw == 11 ~ "Dennery",
+      district_raw == 12 ~ "Gros Islet",
+      TRUE               ~ paste0("Unknown (", district_raw, ")")
+    ),
+    
+    # Tenure
+    owner_occupied    = if_else(tenure_status %in% c(1, 2), 1L, 0L),
+    long_term_rental  = if_else(tenure_status %in% c(3, 4), 1L, 0L),
+    
+    # ---------------------------------------------------------------
+    # FIXED: only treat true system-missing as NA
+    # Do NOT include 9 or 99 here — they are "Not Stated" categories
+    # that simply mean the household lacks that amenity.
+    # ---------------------------------------------------------------
+    across(
+      c(household_size, building_type, tenure_status, wall_material,
+        roof_material, year_built, water_source, toilet_type,
+        lighting_source, rooms, bedrooms, vehicles_owned),
+      ~ if_else(. %in% c(-999999999, 999999999), NA_real_, as.numeric(.))
+    ),
+    
+    # Housing quality indicators
+    # Check the raw distributions above to confirm which codes = "Not Stated"
+    # and adjust these if needed after running the diagnostics.
+    piped_water    = if_else(water_source    %in% c(1, 2), 1L, 0L,   missing = NA_integer_),
+    electricity    = if_else(lighting_source == 1,         1L, 0L,   missing = NA_integer_),
+    improved_toilet= if_else(toilet_type     %in% c(1, 2, 3), 1L, 0L, missing = NA_integer_),
+    durable_walls  = if_else(wall_material   %in% c(1, 2, 3), 1L, 0L, missing = NA_integer_),
+    durable_roof   = if_else(roof_material   %in% c(1, 2, 3), 1L, 0L, missing = NA_integer_),
+    
+    # Crowding
+    rooms_clean          = if_else(rooms    > 0, rooms,    NA_real_),
+    bedrooms_clean       = if_else(bedrooms > 0, bedrooms, NA_real_),
+    persons_per_room     = household_size / rooms_clean,
+    persons_per_bedroom  = household_size / bedrooms_clean,
+    overcrowded          = if_else(persons_per_bedroom > 2, 1L, 0L),
+    
+    # Spare capacity
+    spare_bedrooms = bedrooms_clean - household_size,
+    
+    # Hosting suitability
+    hosting_suitable = if_else(
+      spare_bedrooms  > 0 &
+      piped_water     == 1 &
+      electricity     == 1 &
+      improved_toilet == 1,
+      1L, 0L
+    ),
+    
+    census_year = 2010L
+  ) |>
+  filter(!is.na(district))
+
+cat("Households:", nrow(Thesis_Working_Data_2010), "\n")
+cat("Districts:", n_distinct(Thesis_Working_Data_2010$district), "\n")
+
+Thesis_Working_Data_2010 |>
+  count(district, name = "households") |>
+  arrange(district) |>
+  kbl(caption = "Household count per district after fix") |>
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+---
+
+# Post-Fix Quality Check
+
+Before producing any summaries, verify that the NAs are now resolved.
+
+```{r quality-check}
+Thesis_Working_Data_2010 |>
+  summarise(
+    across(
+      c(piped_water, electricity, improved_toilet, durable_walls, durable_roof,
+        rooms_clean, bedrooms_clean, overcrowded, spare_bedrooms, hosting_suitable),
+      ~ mean(is.na(.)),
+      .names = "pct_na_{.col}"
+    )
+  ) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "pct_missing") |>
+  mutate(
+    variable    = str_remove(variable, "pct_na_"),
+    pct_missing = percent(pct_missing, accuracy = 0.1),
+    status      = if_else(pct_missing == "0.0%", "✅ No NAs", "⚠️ Has NAs")
+  ) |>
+  kbl(col.names = c("Variable", "% Missing", "Status"),
+      caption   = "NA check for key derived variables") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+::: {.callout-important}
+If any variable still shows high missingness after the fix, run the
+raw distribution chunks in Section 2 and look at which codes are
+common. You may need to adjust the `%in%` vectors for the quality
+indicators above to match the 2010 codebook exactly.
+:::
+
+---
+
+# District-Level Summaries
+
+## Rental Supply (2010)
+
+```{r rental-supply}
+Rental_supply_2010 <- Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(
+    long_term_rentals = sum(long_term_rental * household_weight, na.rm = TRUE),
+    total_households  = sum(household_weight, na.rm = TRUE),
+    rental_share      = long_term_rentals / total_households,
+    .groups = "drop"
+  ) |>
+  arrange(desc(rental_share))
+
+Rental_supply_2010 |>
+  mutate(
+    long_term_rentals = comma(round(long_term_rentals)),
+    total_households  = comma(round(total_households)),
+    rental_share      = percent(rental_share, accuracy = 0.1)
+  ) |>
+  kbl(col.names = c("District", "Long-Term Rentals", "Total HH", "Rental Share"),
+      caption   = "Long-Term Rental Supply by District — 2010 (Weighted)") |>
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+```{r rental-supply-plot}
+Rental_supply_2010 |>
+  ggplot(aes(x = reorder(district, rental_share), y = rental_share)) +
+  geom_col(fill = "#2C7BB6") +
+  geom_text(aes(label = percent(rental_share, accuracy = 0.1)),
+            hjust = -0.1, size = 3) +
+  scale_y_continuous(labels = percent,
+                     expand = expansion(mult = c(0, 0.2))) +
+  coord_flip() +
+  labs(title   = "Long-Term Rental Share by District — 2010",
+       x = NULL, y = "Share of Total Households",
+       caption = caption_2010)
+```
+
+## Homeownership (2010)
+
+```{r homeownership}
+Homeownership_2010 <- Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(
+    owner_households  = sum(owner_occupied * household_weight, na.rm = TRUE),
+    total_households  = sum(household_weight, na.rm = TRUE),
+    homeownership_rate = owner_households / total_households,
+    .groups = "drop"
+  ) |>
+  arrange(desc(homeownership_rate))
+
+Homeownership_2010 |>
+  mutate(
+    owner_households   = comma(round(owner_households)),
+    total_households   = comma(round(total_households)),
+    homeownership_rate = percent(homeownership_rate, accuracy = 0.1)
+  ) |>
+  kbl(col.names = c("District", "Owner HH", "Total HH", "Ownership Rate"),
+      caption   = "Homeownership by District — 2010 (Weighted)") |>
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Crowding (2010)
+
+```{r crowding}
+Crowding_2010 <- Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(
+    avg_persons_per_room    = weighted.mean(persons_per_room,    household_weight, na.rm = TRUE),
+    avg_persons_per_bedroom = weighted.mean(persons_per_bedroom, household_weight, na.rm = TRUE),
+    overcrowding_rate       = weighted.mean(overcrowded,         household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(overcrowding_rate))
+
+Crowding_2010 |>
+  mutate(
+    avg_persons_per_room    = round(avg_persons_per_room, 2),
+    avg_persons_per_bedroom = round(avg_persons_per_bedroom, 2),
+    overcrowding_rate       = percent(overcrowding_rate, accuracy = 0.1)
+  ) |>
+  kbl(col.names = c("District", "Persons/Room", "Persons/Bedroom", "Overcrowding Rate"),
+      caption   = "Crowding Indicators by District — 2010 (Weighted)") |>
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Housing Quality (2010)
+
+```{r housing-quality}
+Housing_quality_2010 <- Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(
+    piped_water_rate     = weighted.mean(piped_water,     household_weight, na.rm = TRUE),
+    electricity_rate     = weighted.mean(electricity,     household_weight, na.rm = TRUE),
+    improved_toilet_rate = weighted.mean(improved_toilet, household_weight, na.rm = TRUE),
+    durable_walls_rate   = weighted.mean(durable_walls,   household_weight, na.rm = TRUE),
+    durable_roof_rate    = weighted.mean(durable_roof,    household_weight, na.rm = TRUE),
+    avg_vehicles         = weighted.mean(vehicles_owned,  household_weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+Housing_quality_2010 |>
+  mutate(
+    across(piped_water_rate:durable_roof_rate, ~ percent(., accuracy = 0.1)),
+    avg_vehicles = round(avg_vehicles, 2)
+  ) |>
+  kbl(col.names = c("District", "Piped Water", "Electricity",
+                    "Improved Toilet", "Durable Walls", "Durable Roof", "Avg. Vehicles"),
+      caption   = "Housing Quality by District — 2010 (Weighted)") |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) |>
+  scroll_box(width = "100%")
+```
+
+::: {.callout-note}
+If any column above still shows `NA`, check the raw distribution for that variable in
+Section 2 and update the indicator coding. For example, if `piped_water_rate` is still
+`NA`, look at what codes `water_source` actually contains and adjust
+`piped_water = if_else(water_source %in% c(1, 2), ...)` to match.
+:::
+
+## Spare Bedroom Capacity (2010)
+
+```{r spare-bedrooms}
+Spare_bedrooms_2010 <- Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(
+    avg_spare_bedrooms = weighted.mean(spare_bedrooms, household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(avg_spare_bedrooms))
+
+Spare_bedrooms_2010 |>
+  mutate(avg_spare_bedrooms = round(avg_spare_bedrooms, 2)) |>
+  kbl(col.names = c("District", "Avg. Spare Bedrooms"),
+      caption   = "Spare Bedroom Capacity by District — 2010 (Weighted)") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+---
+
+# The Hosting Suitability Index (2010)
+
+::: {.callout-important}
+## This is the heart of your identification strategy
+
+The Hosting Suitability Index (HSI) is your **pre-treatment instrument**.
+A household is "hosting suitable" if it has:
+
+- At least one **spare bedroom** (capacity for a guest)
+- **Piped water** (minimum comfort standard)
+- **Electricity** (modern utility)
+- **Improved toilet** (sanitation standard)
+
+By computing this from the **2010 census** — before Airbnb became widely
+used in Saint Lucia — you capture which districts *were already set up*
+for short-term rental hosting, independent of any subsequent platform
+adoption decisions.
+
+In your DiD, the district-level HSI from 2010 becomes the "treatment
+intensity" variable: districts with a higher 2010 HSI are predicted to
+have been more exposed to the Airbnb shock, and you test whether those
+districts experienced larger housing market changes between 2010 and 2022.
+:::
+
+```{r suitability}
+Suitability_2010 <- Thesis_Working_Data_2010 |>
+  group_by(district) |>
+  summarise(
+    suitability_index      = weighted.mean(hosting_suitable, household_weight, na.rm = TRUE),
+    suitable_hh_estimated  = sum(hosting_suitable * household_weight, na.rm = TRUE),
+    total_households       = sum(household_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(suitability_index))
+
+Suitability_2010 |>
+  mutate(
+    suitability_index     = percent(suitability_index, accuracy = 0.1),
+    suitable_hh_estimated = comma(round(suitable_hh_estimated)),
+    total_households      = comma(round(total_households))
+  ) |>
+  kbl(col.names = c("District", "Suitability Index", "Suitable HH (Est.)", "Total HH"),
+      caption   = "Hosting Suitability Index by District — 2010") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r suitability-plot}
+Suitability_2010 |>
+  filter(!is.na(suitability_index)) |>
+  ggplot(aes(x = reorder(district, suitability_index),
+             y = suitability_index,
+             fill = suitability_index)) +
+  geom_col() +
+  geom_text(aes(label = percent(suitability_index, accuracy = 0.1)),
+            hjust = -0.1, size = 3) +
+  scale_y_continuous(labels = percent,
+                     expand = expansion(mult = c(0, 0.2))) +
+  scale_fill_gradient(low = "#fee8c8", high = "#e34a33", guide = "none") +
+  coord_flip() +
+  labs(
+    title    = "Hosting Suitability Index by District — 2010",
+    subtitle = "Share of households with spare bedroom, piped water, electricity & improved toilet",
+    x = NULL, y = "Suitability Index (%)",
+    caption = caption_2010
+  )
+```
+
+---
+
+# District Summary Table (2010)
+
+```{r summary-table}
+District_Summary_2010 <- Rental_supply_2010 |>
+  select(district, total_households, rental_share) |>
+  left_join(Homeownership_2010 |> select(district, homeownership_rate), by = "district") |>
+  left_join(Crowding_2010      |> select(district, overcrowding_rate),  by = "district") |>
+  left_join(Suitability_2010   |> select(district, suitability_index),  by = "district") |>
+  left_join(Housing_quality_2010 |> select(district, piped_water_rate, electricity_rate),
+            by = "district") |>
+  mutate(census_year = 2010L)
+
+District_Summary_2010 |>
+  mutate(
+    total_households   = comma(round(total_households)),
+    rental_share       = percent(rental_share,       accuracy = 0.1),
+    homeownership_rate = percent(homeownership_rate, accuracy = 0.1),
+    overcrowding_rate  = percent(overcrowding_rate,  accuracy = 0.1),
+    suitability_index  = percent(suitability_index,  accuracy = 0.1),
+    piped_water_rate   = percent(piped_water_rate,   accuracy = 0.1),
+    electricity_rate   = percent(electricity_rate,   accuracy = 0.1)
+  ) |>
+  select(district, total_households, rental_share, homeownership_rate,
+         overcrowding_rate, suitability_index, piped_water_rate, electricity_rate) |>
+  kbl(
+    col.names = c("District", "Total HH", "Rental Share",
+                  "Ownership Rate", "Overcrowding",
+                  "Suitability", "Piped Water", "Electricity"),
+    caption = "District Housing Indicators — 2010 (complete)"
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) |>
+  add_header_above(c(" " = 2, "Tenure" = 2, "Wellbeing" = 1, "STR Potential" = 3)) |>
+  scroll_box(width = "100%")
+```
+
+---
+
+# Thesis Interpretation
+
+## What does the 2010 baseline tell us?
+
+```{r interpretation-plot}
+#| fig-height: 6
+
+# Rental share vs suitability index — the key relationship for your thesis
+District_Summary_2010 |>
+  filter(!is.na(suitability_index), !is.na(rental_share)) |>
+  ggplot(aes(x = suitability_index, y = rental_share, label = district)) +
+  geom_point(aes(size = total_households),
+             color = "#2C7BB6", alpha = 0.7) +
+  geom_text_repel(size = 3.2, max.overlaps = 12) +
+  geom_smooth(method = "lm", se = TRUE, color = "#D7191C",
+              linewidth = 0.8, linetype = "dashed") +
+  scale_x_continuous(labels = percent) +
+  scale_y_continuous(labels = percent) +
+  scale_size_continuous(labels = comma, range = c(2, 8),
+                        guide  = guide_legend(title = "Total HH")) +
+  labs(
+    title    = "2010 Hosting Suitability vs Rental Share",
+    subtitle = "Pre-treatment relationship: more suitable districts had higher initial rental share",
+    x        = "Hosting Suitability Index (2010)",
+    y        = "Long-Term Rental Share (2010)",
+    caption  = caption_2010
+  )
+```
+
+::: {.callout-tip}
+## Interpreting this chart for your thesis
+
+A **positive slope** here is expected — districts with more suitable
+housing stock naturally also have more renters. This is **not** a causal
+finding; it's a baseline correlation.
+
+The causal story in your thesis is the *change* version of this: after 2014,
+did districts with higher 2010 suitability experience **larger increases in
+rental share** or **larger decreases in homeownership**? That's the DiD estimate.
+:::
+
+---
+
+# What to Do Next
+
+After confirming the NA fix works, your next steps are:
+
+1. **Run this Quarto document** to confirm all quality indicators now have real values.
+   Look at the raw distribution tables in Section 2 — if any variable still has
+   unexpected NAs, adjust the coding in Section 3.
+
+2. **Save `District_Summary_2010`** — this feeds directly into your DiD panel when
+   combined with `District_Summary_2022`.
+
+3. **Cross-check the district mapping** with Diana at the Statistics Office —
+   particularly whether Districts 1/2/3 in 2010 map cleanly to Districts 1/2/3 in 2022.
+
+4. **Build the DiD panel** by stacking 2010 and 2022 district summaries, then
+   computing the change in each outcome variable. The 2010 suitability index
+   becomes your treatment intensity measure.
