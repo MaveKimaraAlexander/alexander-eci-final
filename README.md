@@ -17,8 +17,8 @@ This repository contains the replication code for my thesis, which investigates 
 
 | File | Description |
 |---|---|
-| `MAVE_Thesis_Progress_Update_9.R` | Standalone reproducible R script — all data loading, models, figures, and tables |
-| `MAVE_Thesis_Progress_Update_6.qmd` | Full Quarto document — renders the complete PDF thesis |
+| `eci_str_replication.R` | Standalone reproducible R script — all data loading, models, figures, and tables |
+| `eci_str_thesis.qmd` | Full Quarto document — renders the complete PDF thesis |
 | `NTE_constituency.csv` | Natural Tourism Endowment scores by constituency (Bartik share) |
 | `natural_amenities_nte_assigned.csv` | Raw OSM natural features with GPS coordinates, weights, and constituency assignment |
 | `nte_district.csv` | District-level NTE used in district robustness checks |
@@ -56,7 +56,7 @@ install.packages(c(
 ### Running the analysis
 
 1. Obtain the three confidential `.sav` files from the CSO and place them in the same directory as the R script.
-2. Open `MAVE_Thesis_Progress_Update_9.R` and update the `setwd()` path at the top of the script to match your local directory:
+2. Open `eci_str_replication.R` and update the `setwd()` path at the top of the script to match your local directory:
 
 ```r
 setwd("path/to/your/project")
@@ -69,7 +69,7 @@ setwd("path/to/your/project")
 With [Quarto](https://quarto.org) installed, render the thesis document from the terminal:
 
 ```bash
-quarto render "MAVE_Thesis_Progress_Update_6.qmd"
+quarto render "eci_str_thesis.qmd"
 ```
 
 ---

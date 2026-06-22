@@ -4,7 +4,7 @@
 #
 # Author : Mave Kimara Alexander | 113077424
 # Date   : 2026-06-13
-# Source : MAVE_Thesis_Progress_Update_6.qmd
+# Source : eci_str_thesis.qmd
 #
 # Reproducible standalone R script. All data loading, model fitting, figures,
 # and tables are produced in sequence from this single file.
