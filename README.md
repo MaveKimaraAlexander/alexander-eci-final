@@ -21,10 +21,10 @@ This repository contains the replication code for my thesis, which investigates 
 | `MAVE_Thesis_Progress_Update_6.qmd` | Full Quarto document — renders the complete PDF thesis |
 | `NTE_constituency.csv` | Natural Tourism Endowment scores by constituency (Bartik share) |
 | `natural_amenities_nte_assigned.csv` | Raw OSM natural features with GPS coordinates, weights, and constituency assignment |
-| `TPI_v2_attraction_concentration.csv` | District-level NTE (TPI v2) used in district robustness checks |
+| `nte_district.csv` | District-level NTE used in district robustness checks |
 | `Selected-Tourism-Statistics.csv` | Annual stay-over arrivals 2010–2025, CSO Saint Lucia |
-| `NTE_Map_Saint_Lucia.png` | District-level NTE choropleth map |
-| `map_001.png` | Saint Lucia constituency boundary reference map |
+| `cons_wide.csv` | Constituency-level aggregated housing outcomes (2010 & 2022) — derived from census microdata; behind Figures 3, 5, 9, 10 and Table 6 |
+| `dist_wide.csv` | District-level aggregated housing outcomes (2010 & 2022) — derived from census microdata; behind Figure 6 |
 
 ---
 
@@ -62,7 +62,7 @@ install.packages(c(
 setwd("path/to/your/project")
 ```
 
-3. Run the script top-to-bottom. Figures will appear in RStudio's plot viewer; regression tables will print to the console.
+3. Run the script top-to-bottom. Figures are saved as PNG files in the working directory; regression tables print to the console.
 
 ### Rendering the full PDF
 
@@ -94,6 +94,12 @@ $$Z_{ct} = NTE_c \times \Delta g \times \text{Post}_t$$
 | RQ1 — Rent inflation | ~18% rent premium in highest vs. lowest NTE constituency | Not significant at 17-cluster level |
 | RQ3 — Ownership | Owner-occupancy *fell* in high-NTE areas — tenure conversion, not gentrification | < 0.10 |
 | RQ4 — Crowding | No robust evidence of crowding effect in either direction | Not significant |
+
+---
+
+## AI Use
+
+Claude Code (Anthropic, claude-sonnet-4-6) was used as a coding assistant during this project. Specifically, it assisted with: debugging R data wrangling code, refining ggplot2 figure formatting, structuring the Bartik IV pipeline, and preparing this replication package (renaming files, writing the `.gitignore`, and setting up the GitHub repository). All econometric design decisions, interpretation of results, and written analysis are the author's own.
 
 ---
 

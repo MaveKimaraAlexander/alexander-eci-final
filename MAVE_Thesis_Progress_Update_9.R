@@ -248,6 +248,8 @@ cons_wide <- cons_2010 |>
     d_ppbr    = ppbr_22    - ppbr_10
   )
 
+write.csv(cons_wide, "cons_wide.csv", row.names = FALSE)
+
 panel <- bind_rows(
   cons_2010 |>
     left_join(nte_data, by = "constituency") |>
@@ -306,6 +308,8 @@ dist_wide <- cons_wide |>
     d_renter       = (renter_rate_22 - renter_rate_10) * 100,
     .groups = "drop"
   )
+
+write.csv(dist_wide, "dist_wide.csv", row.names = FALSE)
 
 nte_dist <- read.csv("nte_district.csv") |>
   select(district, nte_dist = nte)
