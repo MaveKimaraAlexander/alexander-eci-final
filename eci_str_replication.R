@@ -32,7 +32,6 @@
 setwd("C:/Users/mavek/OneDrive/Desktop/IMBA Douments/semester 4/Thesis/Thesis Data")
 
 # ── 0. Libraries ──────────────────────────────────────────────────────────────
-library(haven)
 library(tidyverse)
 library(labelled)
 library(knitr)
@@ -122,6 +121,7 @@ nte_dist <- read.csv("nte_district.csv") |>
 USE_PRECOMPUTED <- !file.exists("PersonHHoldMerge 2022 Annon.sav")
 
 if (!USE_PRECOMPUTED) {
+  library(haven)
 
   # ── 2. Census Data ──────────────────────────────────────────────────────────
   raw_2022 <- read_sav("PersonHHoldMerge 2022 Annon.sav")

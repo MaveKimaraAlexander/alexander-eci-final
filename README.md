@@ -19,6 +19,7 @@ This repository contains the replication code for my thesis, which investigates 
 |---|---|
 | `eci_str_replication.R` | Standalone reproducible R script — all data loading, models, figures, and tables |
 | `eci_str_thesis.qmd` | Full Quarto document — renders the complete PDF thesis |
+| `Alexander Final Project Report ECI - The Effects of STR Platforms on St. Lucian Housing Market.pdf` | Final submitted thesis PDF |
 | `NTE_constituency.csv` | Natural Tourism Endowment scores by constituency (Bartik share) |
 | `natural_amenities_nte_assigned.csv` | Raw OSM natural features with GPS coordinates, weights, and constituency assignment |
 | `nte_district.csv` | District-level NTE used in district robustness checks |
@@ -61,7 +62,7 @@ install.packages(c(
 
 ### Running the analysis
 
-The three `.sav` census files are required to run the full script. If you do not have them, `hh_panel_replication.csv` and `iddetail_str.csv` (included in this repo) contain all variables needed to reproduce every regression and figure — no `.sav` files required for those steps.
+The three `.sav` census files are required to run the full script. If you do not have them, `hh_panel_replication.csv` and `iddetail_str.csv` (included in this repo) contain all variables needed to reproduce every regression and figure — no `.sav` files required.
 
 1. Obtain the three confidential `.sav` files from the CSO and place them in the same directory as the R script (or skip this step if using the pre-processed CSVs).
 2. Open `eci_str_replication.R` and update the `setwd()` path at the top of the script to match your local directory:
