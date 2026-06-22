@@ -56,7 +56,7 @@ install.packages(c(
 ### Running the analysis
 
 1. Obtain the three confidential `.sav` files from the CSO and place them in the same directory as the R script.
-2. Open `MAVE_Thesis_Progress_Update_9.R` in RStudio and set the working directory to the project folder:
+2. Open `MAVE_Thesis_Progress_Update_9.R` and update the `setwd()` path at the top of the script to match your local directory:
 
 ```r
 setwd("path/to/your/project")
@@ -90,7 +90,7 @@ $$Z_{ct} = NTE_c \times \Delta g \times \text{Post}_t$$
 
 | Research Question | Finding | p-value |
 |---|---|---|
-| RQ2 — Stock depletion | High-NTE constituencies saw significantly larger increases in renter rates (β̂ RF ≈ 0.84) | < 0.05 |
+| RQ2 — Stock depletion | High-NTE constituencies saw significantly larger increases in renter rates (β̂ RF = 2.106) | < 0.05 |
 | RQ1 — Rent inflation | ~18% rent premium in highest vs. lowest NTE constituency | Not significant at 17-cluster level |
 | RQ3 — Ownership | Owner-occupancy *fell* in high-NTE areas — tenure conversion, not gentrification | < 0.10 |
 | RQ4 — Crowding | No robust evidence of crowding effect in either direction | Not significant |
