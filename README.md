@@ -25,6 +25,8 @@ This repository contains the replication code for my thesis, which investigates 
 | `Selected-Tourism-Statistics.csv` | Annual stay-over arrivals 2010–2025, CSO Saint Lucia |
 | `cons_wide.csv` | Constituency-level aggregated housing outcomes (2010 & 2022) — derived from census microdata; behind Figures 3, 5, 9, 10 and Table 6 |
 | `dist_wide.csv` | District-level aggregated housing outcomes (2010 & 2022) — derived from census microdata; behind Figure 6 |
+| `NTE_Map_Saint_Lucia.png` | District-level NTE choropleth map — embedded in Figure 2 of the thesis |
+| `map_001.png` | Saint Lucia constituency boundary reference map — embedded in Figure 2 of the thesis |
 
 ---
 
