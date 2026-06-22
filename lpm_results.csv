@@ -1,4 +1,0 @@
-"model","term","estimate","std_error","p_value","nobs","r2","adj_r2"
-"(1) GT Shift","tpi_post_gt",0.051639,0.003923,0,100829,0.0529,0.0527
-"(2) Arrivals Shift","tpi_post",2.019027,0.153379,0,100829,0.0529,0.0527
-"(3) Combined Shift","tpi_post_combined",0.322894,0.024529,0,100829,0.0529,0.0527
