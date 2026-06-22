@@ -54,10 +54,13 @@ Researchers who wish to replicate the full derivation pipeline from raw microdat
 Install the following R packages:
 
 ```r
+# Required for all replication paths
 install.packages(c(
-  "haven", "tidyverse", "labelled", "knitr", "scales",
-  "ggrepel", "kableExtra", "fixest", "modelsummary"
+  "tidyverse", "scales", "ggrepel", "kableExtra", "fixest", "modelsummary"
 ))
+
+# Required only if loading from raw .sav census files
+install.packages(c("haven", "labelled"))
 ```
 
 ### Running the analysis

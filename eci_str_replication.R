@@ -33,8 +33,6 @@ setwd("C:/Users/mavek/OneDrive/Desktop/IMBA Douments/semester 4/Thesis/Thesis Da
 
 # ── 0. Libraries ──────────────────────────────────────────────────────────────
 library(tidyverse)
-library(labelled)
-library(knitr)
 library(scales)
 library(ggrepel)
 library(kableExtra)
@@ -122,6 +120,7 @@ USE_PRECOMPUTED <- !file.exists("PersonHHoldMerge 2022 Annon.sav")
 
 if (!USE_PRECOMPUTED) {
   library(haven)
+  library(labelled)
 
   # ── 2. Census Data ──────────────────────────────────────────────────────────
   raw_2022 <- read_sav("PersonHHoldMerge 2022 Annon.sav")
