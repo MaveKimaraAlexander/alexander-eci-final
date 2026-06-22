@@ -142,6 +142,11 @@ raw_iddetail <- read_sav("IDDetail_merged_Anon_Weights_DwellStatus.sav") |>
     )
   )
 
+write.csv(
+  raw_iddetail |> select(district, str_unit, str_unit_broad),
+  "iddetail_str.csv", row.names = FALSE
+)
+
 # ── 4. NTE and Tourism Shift ───────────────────────────────────────────────────
 nte_data <- read.csv("NTE_constituency.csv") |>
   select(constituency, nte, tourism_tier)
@@ -275,6 +280,14 @@ hh_panel <- bind_rows(
   left_join(panel    |> select(constituency, year, str_count, str_count_broad),
             by = c("constituency", "year")) |>
   mutate(nte_post = nte * national_shift * post)
+
+write.csv(
+  hh_panel |> select(renter, owner, rentfree, persons_per_bedroom,
+                     monthly_rent, tenure, bedrooms, household_size,
+                     constituency, year, post, hh_weight,
+                     nte, nte_post, str_count, str_count_broad),
+  "hh_panel_replication.csv", row.names = FALSE
+)
 
 # ── 7. District-Level Data ────────────────────────────────────────────────────
 cons_to_dist <- tribble(

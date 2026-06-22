@@ -23,6 +23,8 @@ This repository contains the replication code for my thesis, which investigates 
 | `natural_amenities_nte_assigned.csv` | Raw OSM natural features with GPS coordinates, weights, and constituency assignment |
 | `nte_district.csv` | District-level NTE used in district robustness checks |
 | `Selected-Tourism-Statistics.csv` | Annual stay-over arrivals 2010–2025, CSO Saint Lucia |
+| `hh_panel_replication.csv` | Household-level analysis panel (100,829 rows × 16 cols) — exact variables used in all regressions, derived from the 2010 and 2022 census microdata with no personal identifiers |
+| `iddetail_str.csv` | Building-level STR classification (77,615 rows) — district, narrow STR flag, broad STR flag; derived from the 2022 IDDetail enumeration |
 | `cons_wide.csv` | Constituency-level aggregated housing outcomes (2010 & 2022) — derived from census microdata; behind Figures 3, 5, 9, 10 and Table 6 |
 | `dist_wide.csv` | District-level aggregated housing outcomes (2010 & 2022) — derived from census microdata; behind Figure 6 |
 | `NTE_Map_Saint_Lucia.png` | District-level NTE choropleth map — embedded in Figure 2 of the thesis |
@@ -57,7 +59,9 @@ install.packages(c(
 
 ### Running the analysis
 
-1. Obtain the three confidential `.sav` files from the CSO and place them in the same directory as the R script.
+The three `.sav` census files are required to run the full script. If you do not have them, `hh_panel_replication.csv` and `iddetail_str.csv` (included in this repo) contain all variables needed to reproduce every regression and figure — no `.sav` files required for those steps.
+
+1. Obtain the three confidential `.sav` files from the CSO and place them in the same directory as the R script (or skip this step if using the pre-processed CSVs).
 2. Open `eci_str_replication.R` and update the `setwd()` path at the top of the script to match your local directory:
 
 ```r
