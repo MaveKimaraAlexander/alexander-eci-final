@@ -9,17 +9,21 @@
 # Reproducible standalone R script. All data loading, model fitting, figures,
 # and tables are produced in sequence from this single file.
 #
-# REQUIRED DATA FILES (place in working directory or update paths below):
-#   PersonHHoldMerge 2022 Annon.sav
-#   person_house_merged.sav
-#   IDDetail_merged_Anon_Weights_DwellStatus.sav
-#   NTE_constituency.csv
-#   Selected-Tourism-Statistics.csv
-#   natural_amenities_nte_assigned.csv
-#   nte_district.csv
+# REQUIRED DATA FILES:
+#   Without .sav files: hh_panel_replication.csv + iddetail_str.csv (in repo)
+#                       reproduce all regressions and figures
+#   With .sav files: full derivation from raw census microdata
+#     PersonHHoldMerge 2022 Annon.sav
+#     person_house_merged.sav
+#     IDDetail_merged_Anon_Weights_DwellStatus.sav
+#   Always required (included in repo):
+#     NTE_constituency.csv
+#     Selected-Tourism-Statistics.csv
+#     natural_amenities_nte_assigned.csv
+#     nte_district.csv
 #
 # NOTE: For the fully formatted PDF with LaTeX tables and embedded figures,
-# render MAVE_Thesis_Progress_Update_6.qmd. This script is for replication,
+# render eci_str_thesis.qmd. This script is for replication,
 # interactive exploration, and version control on GitHub.
 # ==============================================================================
 
@@ -63,91 +67,7 @@ cons_name_map <- c(
   "1600" = "Dennery North",     "1700" = "Castries South-East"
 )
 
-# ── 2. Census Data ─────────────────────────────────────────────────────────────
-
-# 2022 Census
-raw_2022 <- read_sav("PersonHHoldMerge 2022 Annon.sav")
-
-hh_2022 <- raw_2022 |>
-  distinct(CompositeKey, .keep_all = TRUE) |>
-  select(CompositeKey, CONSTITUENCY, Npersons,
-         h2_3a, h2_3b1, h2_15, HHLD_WEIGHT) |>
-  rename(
-    household_id    = CompositeKey,
-    constituency_id = CONSTITUENCY,
-    household_size  = Npersons,
-    tenure          = h2_3a,
-    monthly_rent    = h2_3b1,
-    bedrooms        = h2_15,
-    hh_weight       = HHLD_WEIGHT
-  ) |>
-  zap_labels() |>
-  mutate(
-    across(c(tenure, monthly_rent, bedrooms, household_size, constituency_id),
-           ~ if_else(. %in% c(-999999999, 999999999), NA_real_, as.numeric(.))),
-    constituency        = cons_name_map[as.character(as.integer(constituency_id))],
-    owner               = if_else(tenure %in% 1:6, 1, 0),
-    renter              = if_else(tenure %in% 7:8, 1, 0),
-    rentfree            = if_else(tenure == 9,     1, 0),
-    persons_per_bedroom = if_else(bedrooms > 0, household_size / bedrooms, NA_real_)
-  ) |>
-  filter(!is.na(constituency))
-
-# 2010 Census
-raw_2010 <- read_sav("person_house_merged.sav")
-
-hh_2010 <- raw_2010 |>
-  mutate(household_id_2010 = paste(DISTRICT, ED, HH, sep = "_")) |>
-  group_by(household_id_2010) |>
-  mutate(HWEIGHT = suppressWarnings(max(HWEIGHT, na.rm = TRUE)),
-         HWEIGHT = if_else(is.infinite(HWEIGHT), NA_real_, HWEIGHT)) |>
-  ungroup() |>
-  distinct(household_id_2010, .keep_all = TRUE) |>
-  select(household_id_2010, poldist, NPERS, H13_OWN, H24_BEDROOMS, HWEIGHT) |>
-  rename(
-    household_id    = household_id_2010,
-    constituency_id = poldist,
-    household_size  = NPERS,
-    tenure          = H13_OWN,
-    bedrooms        = H24_BEDROOMS,
-    hh_weight       = HWEIGHT
-  ) |>
-  zap_labels() |>
-  mutate(
-    across(c(tenure, bedrooms, household_size, constituency_id),
-           ~ if_else(. %in% c(-999999999, 999999999), NA_real_, as.numeric(.))),
-    persons_per_bedroom = if_else(bedrooms > 0, household_size / bedrooms, NA_real_),
-    constituency        = cons_name_map[as.character(as.integer(constituency_id))],
-    owner               = if_else(tenure %in% c(1, 2), 1, 0),
-    renter              = if_else(tenure %in% c(3, 4), 1, 0),
-    rentfree            = if_else(tenure == 5, 1, 0)
-  ) |>
-  filter(!is.na(constituency))
-
-# ── 3. Building Enumeration (IDDetail) ────────────────────────────────────────
-raw_iddetail <- read_sav("IDDetail_merged_Anon_Weights_DwellStatus.sav") |>
-  zap_labels() |>
-  mutate(
-    district_code  = districtCode,
-    str_unit       = if_else(DwellingStatus %in% c(8, 12),    1L, 0L),
-    str_unit_broad = if_else(DwellingStatus %in% c(4, 8, 12), 1L, 0L)
-  ) |>
-  filter(!is.na(district_code)) |>
-  mutate(
-    district = case_match(as.integer(district_code),
-      2  ~ "Castries",   3  ~ "AnselaRaye", 4  ~ "Canaries",
-      5  ~ "Soufriere",  6  ~ "Choiseul",   7  ~ "Laborie",
-      8  ~ "VieuxFort",  9  ~ "Micoud",     10 ~ "Dennery",
-      11 ~ "GrosIslet"
-    )
-  )
-
-write.csv(
-  raw_iddetail |> select(district, str_unit, str_unit_broad),
-  "iddetail_str.csv", row.names = FALSE
-)
-
-# ── 4. NTE and Tourism Shift ───────────────────────────────────────────────────
+# ── 4. NTE and Tourism Shift (always runs) ────────────────────────────────────
 nte_data <- read.csv("NTE_constituency.csv") |>
   select(constituency, nte, tourism_tier)
 
@@ -169,127 +89,7 @@ pre_avg        <- mean(stay_annual$arrivals[stay_annual$year %in% 2010:2014])
 post_avg       <- mean(stay_annual$arrivals[stay_annual$year %in% c(2015:2019, 2022)])
 national_shift <- (post_avg - pre_avg) / pre_avg   # Δg = 0.187
 
-# ── 5. STR Counts: District → Constituency Allocation ─────────────────────────
-dist_to_cons <- tribble(
-  ~district,     ~constituency,
-  "Castries",    "Babonneau",
-  "Castries",    "Castries North",
-  "Castries",    "Castries East",
-  "Castries",    "Castries Central",
-  "Castries",    "Castries South",
-  "Castries",    "Castries South-East",
-  "AnselaRaye",  "Anse-la-Raye/Canaries",
-  "Canaries",    "Anse-la-Raye/Canaries",
-  "Soufriere",   "Soufriere",
-  "Choiseul",    "Choiseul",
-  "Laborie",     "Laborie",
-  "VieuxFort",   "Vieux-Fort South",
-  "VieuxFort",   "Vieux-Fort North",
-  "Micoud",      "Micoud South",
-  "Micoud",      "Micoud North",
-  "Dennery",     "Dennery South",
-  "Dennery",     "Dennery North",
-  "GrosIslet",   "Gros Islet"
-)
-
-cons_hh_wts <- hh_2010 |>
-  filter(!is.na(hh_weight)) |>
-  group_by(constituency) |>
-  summarise(hh_wt = sum(hh_weight), .groups = "drop")
-
-make_cons_str <- function(unit_var, count_name) {
-  dist_to_cons |>
-    left_join(cons_hh_wts, by = "constituency") |>
-    left_join(
-      raw_iddetail |>
-        group_by(district) |>
-        summarise(dist_str = sum(.data[[unit_var]], na.rm = TRUE), .groups = "drop"),
-      by = "district"
-    ) |>
-    group_by(district) |>
-    mutate(cons_share = hh_wt / sum(hh_wt, na.rm = TRUE)) |>
-    ungroup() |>
-    group_by(constituency) |>
-    summarise(!!count_name := sum(dist_str * cons_share, na.rm = TRUE), .groups = "drop")
-}
-
-cons_str       <- make_cons_str("str_unit",       "str_count")
-cons_str_broad <- make_cons_str("str_unit_broad",  "str_count_broad")
-
-# ── 6. Constituency and Panel Data ────────────────────────────────────────────
-cons_2022 <- hh_2022 |>
-  filter(!is.na(hh_weight)) |>
-  group_by(constituency) |>
-  summarise(
-    renter_rate_22   = weighted.mean(renter,              hh_weight, na.rm = TRUE),
-    owner_rate_22    = weighted.mean(owner,               hh_weight, na.rm = TRUE),
-    rentfree_rate_22 = weighted.mean(rentfree,            hh_weight, na.rm = TRUE),
-    hh_size_22       = weighted.mean(household_size,      hh_weight, na.rm = TRUE),
-    ppbr_22          = weighted.mean(persons_per_bedroom, hh_weight, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-cons_2010 <- hh_2010 |>
-  filter(!is.na(hh_weight)) |>
-  group_by(constituency) |>
-  summarise(
-    renter_rate_10   = weighted.mean(renter,              hh_weight, na.rm = TRUE),
-    owner_rate_10    = weighted.mean(owner,               hh_weight, na.rm = TRUE),
-    rentfree_rate_10 = weighted.mean(rentfree,            hh_weight, na.rm = TRUE),
-    hh_size_10       = weighted.mean(household_size,      hh_weight, na.rm = TRUE),
-    ppbr_10          = weighted.mean(persons_per_bedroom, hh_weight, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-cons_wide <- cons_2010 |>
-  left_join(cons_2022,       by = "constituency") |>
-  left_join(nte_data,        by = "constituency") |>
-  left_join(cons_str,        by = "constituency") |>
-  left_join(cons_str_broad,  by = "constituency") |>
-  mutate(
-    d_renter  = (renter_rate_22 - renter_rate_10) * 100,
-    d_owner   = (owner_rate_22  - owner_rate_10)  * 100,
-    d_hh_size = hh_size_22 - hh_size_10,
-    d_ppbr    = ppbr_22    - ppbr_10
-  )
-
-write.csv(cons_wide, "cons_wide.csv", row.names = FALSE)
-
-panel <- bind_rows(
-  cons_2010 |>
-    left_join(nte_data, by = "constituency") |>
-    mutate(year = 2010, post = 0,
-           renter_rate = renter_rate_10, owner_rate = owner_rate_10,
-           rentfree_rate = rentfree_rate_10, hh_size = hh_size_10, ppbr = ppbr_10,
-           str_count = 0, str_count_broad = 0),
-  cons_2022 |>
-    left_join(nte_data,       by = "constituency") |>
-    left_join(cons_str,       by = "constituency") |>
-    left_join(cons_str_broad, by = "constituency") |>
-    mutate(year = 2022, post = 1,
-           renter_rate = renter_rate_22, owner_rate = owner_rate_22,
-           rentfree_rate = rentfree_rate_22, hh_size = hh_size_22, ppbr = ppbr_22)
-) |>
-  mutate(nte_post = nte * national_shift * post)
-
-hh_panel <- bind_rows(
-  hh_2010 |> mutate(year = 2010L, post = 0L),
-  hh_2022 |> mutate(year = 2022L, post = 1L)
-) |>
-  left_join(nte_data |> select(constituency, nte), by = "constituency") |>
-  left_join(panel    |> select(constituency, year, str_count, str_count_broad),
-            by = c("constituency", "year")) |>
-  mutate(nte_post = nte * national_shift * post)
-
-write.csv(
-  hh_panel |> select(renter, owner, rentfree, persons_per_bedroom,
-                     monthly_rent, tenure, bedrooms, household_size,
-                     constituency, year, post, hh_weight,
-                     nte, nte_post, str_count, str_count_broad),
-  "hh_panel_replication.csv", row.names = FALSE
-)
-
-# ── 7. District-Level Data ────────────────────────────────────────────────────
+# Crosswalk and district NTE — needed in both data-loading paths
 cons_to_dist <- tribble(
   ~constituency,           ~district,
   "Gros Islet",            "Gros Islet",
@@ -311,63 +111,335 @@ cons_to_dist <- tribble(
   "Dennery North",         "Dennery"
 )
 
-dist_wide <- cons_wide |>
-  left_join(cons_to_dist, by = "constituency") |>
-  left_join(cons_hh_wts,  by = "constituency") |>
-  group_by(district) |>
-  summarise(
-    renter_rate_10 = weighted.mean(renter_rate_10, hh_wt, na.rm = TRUE),
-    renter_rate_22 = weighted.mean(renter_rate_22, hh_wt, na.rm = TRUE),
-    d_renter       = (renter_rate_22 - renter_rate_10) * 100,
-    .groups = "drop"
-  )
-
-write.csv(dist_wide, "dist_wide.csv", row.names = FALSE)
-
 nte_dist <- read.csv("nte_district.csv") |>
   select(district, nte_dist = nte)
 
-dist_plot <- dist_wide |>
-  left_join(nte_dist, by = "district")
+# ── 2–7. Data Loading ─────────────────────────────────────────────────────────
+# Full path  : loads raw .sav census files, derives all objects from scratch,
+#              and exports the pre-processed CSVs for future use.
+# Precomputed: loads hh_panel_replication.csv + iddetail_str.csv from this repo
+#              — no .sav files required. All regressions and figures still run.
+USE_PRECOMPUTED <- !file.exists("PersonHHoldMerge 2022 Annon.sav")
 
-dist_str_direct <- raw_iddetail |>
-  mutate(
-    district_h = case_when(
-      district %in% c("AnselaRaye", "Canaries") ~ "Anse-la-Raye",
-      district == "VieuxFort"                   ~ "Vieux Fort",
-      district == "GrosIslet"                   ~ "Gros Islet",
-      TRUE                                      ~ district
+if (!USE_PRECOMPUTED) {
+
+  # ── 2. Census Data ──────────────────────────────────────────────────────────
+  raw_2022 <- read_sav("PersonHHoldMerge 2022 Annon.sav")
+
+  hh_2022 <- raw_2022 |>
+    distinct(CompositeKey, .keep_all = TRUE) |>
+    select(CompositeKey, CONSTITUENCY, Npersons,
+           h2_3a, h2_3b1, h2_15, HHLD_WEIGHT) |>
+    rename(
+      household_id    = CompositeKey,
+      constituency_id = CONSTITUENCY,
+      household_size  = Npersons,
+      tenure          = h2_3a,
+      monthly_rent    = h2_3b1,
+      bedrooms        = h2_15,
+      hh_weight       = HHLD_WEIGHT
+    ) |>
+    zap_labels() |>
+    mutate(
+      across(c(tenure, monthly_rent, bedrooms, household_size, constituency_id),
+             ~ if_else(. %in% c(-999999999, 999999999), NA_real_, as.numeric(.))),
+      constituency        = cons_name_map[as.character(as.integer(constituency_id))],
+      owner               = if_else(tenure %in% 1:6, 1, 0),
+      renter              = if_else(tenure %in% 7:8, 1, 0),
+      rentfree            = if_else(tenure == 9,     1, 0),
+      persons_per_bedroom = if_else(bedrooms > 0, household_size / bedrooms, NA_real_)
+    ) |>
+    filter(!is.na(constituency))
+
+  raw_2010 <- read_sav("person_house_merged.sav")
+
+  hh_2010 <- raw_2010 |>
+    mutate(household_id_2010 = paste(DISTRICT, ED, HH, sep = "_")) |>
+    group_by(household_id_2010) |>
+    mutate(HWEIGHT = suppressWarnings(max(HWEIGHT, na.rm = TRUE)),
+           HWEIGHT = if_else(is.infinite(HWEIGHT), NA_real_, HWEIGHT)) |>
+    ungroup() |>
+    distinct(household_id_2010, .keep_all = TRUE) |>
+    select(household_id_2010, poldist, NPERS, H13_OWN, H24_BEDROOMS, HWEIGHT) |>
+    rename(
+      household_id    = household_id_2010,
+      constituency_id = poldist,
+      household_size  = NPERS,
+      tenure          = H13_OWN,
+      bedrooms        = H24_BEDROOMS,
+      hh_weight       = HWEIGHT
+    ) |>
+    zap_labels() |>
+    mutate(
+      across(c(tenure, bedrooms, household_size, constituency_id),
+             ~ if_else(. %in% c(-999999999, 999999999), NA_real_, as.numeric(.))),
+      persons_per_bedroom = if_else(bedrooms > 0, household_size / bedrooms, NA_real_),
+      constituency        = cons_name_map[as.character(as.integer(constituency_id))],
+      owner               = if_else(tenure %in% c(1, 2), 1, 0),
+      renter              = if_else(tenure %in% c(3, 4), 1, 0),
+      rentfree            = if_else(tenure == 5, 1, 0)
+    ) |>
+    filter(!is.na(constituency))
+
+  # ── 3. Building Enumeration (IDDetail) ──────────────────────────────────────
+  raw_iddetail <- read_sav("IDDetail_merged_Anon_Weights_DwellStatus.sav") |>
+    zap_labels() |>
+    mutate(
+      district_code  = districtCode,
+      str_unit       = if_else(DwellingStatus %in% c(8, 12),    1L, 0L),
+      str_unit_broad = if_else(DwellingStatus %in% c(4, 8, 12), 1L, 0L)
+    ) |>
+    filter(!is.na(district_code)) |>
+    mutate(
+      district = case_match(as.integer(district_code),
+        2  ~ "Castries",   3  ~ "AnselaRaye", 4  ~ "Canaries",
+        5  ~ "Soufriere",  6  ~ "Choiseul",   7  ~ "Laborie",
+        8  ~ "VieuxFort",  9  ~ "Micoud",     10 ~ "Dennery",
+        11 ~ "GrosIslet"
+      )
     )
-  ) |>
-  group_by(district = district_h) |>
-  summarise(
-    str_count_d       = sum(str_unit,       na.rm = TRUE),
-    str_count_broad_d = sum(str_unit_broad, na.rm = TRUE),
-    .groups = "drop"
+
+  write.csv(
+    raw_iddetail |> select(district, str_unit, str_unit_broad),
+    "iddetail_str.csv", row.names = FALSE
   )
 
-hh_panel_dist <- hh_panel |>
-  left_join(cons_to_dist, by = "constituency") |>
-  left_join(nte_dist,      by = "district") |>
-  left_join(
-    bind_rows(
-      dist_str_direct |> mutate(year = 2022L),
-      dist_str_direct |> mutate(year = 2010L, str_count_d = 0, str_count_broad_d = 0)
-    ),
-    by = c("district", "year")
-  ) |>
-  mutate(nte_post_dist = nte_dist * national_shift * post)
+  # ── 5. STR Counts: District → Constituency Allocation ───────────────────────
+  dist_to_cons <- tribble(
+    ~district,     ~constituency,
+    "Castries",    "Babonneau",
+    "Castries",    "Castries North",
+    "Castries",    "Castries East",
+    "Castries",    "Castries Central",
+    "Castries",    "Castries South",
+    "Castries",    "Castries South-East",
+    "AnselaRaye",  "Anse-la-Raye/Canaries",
+    "Canaries",    "Anse-la-Raye/Canaries",
+    "Soufriere",   "Soufriere",
+    "Choiseul",    "Choiseul",
+    "Laborie",     "Laborie",
+    "VieuxFort",   "Vieux-Fort South",
+    "VieuxFort",   "Vieux-Fort North",
+    "Micoud",      "Micoud South",
+    "Micoud",      "Micoud North",
+    "Dennery",     "Dennery South",
+    "Dennery",     "Dennery North",
+    "GrosIslet",   "Gros Islet"
+  )
 
-dist_panel_agg <- bind_rows(
-  dist_wide |>
-    left_join(nte_dist, by = "district") |>
-    mutate(year = 2010, post = 0, str_count_d = 0, str_count_broad_d = 0),
-  dist_wide |>
-    left_join(nte_dist,        by = "district") |>
-    left_join(dist_str_direct, by = "district") |>
-    mutate(year = 2022, post = 1)
-) |>
-  mutate(nte_post_dist = nte_dist * national_shift * post)
+  cons_hh_wts <- hh_2010 |>
+    filter(!is.na(hh_weight)) |>
+    group_by(constituency) |>
+    summarise(hh_wt = sum(hh_weight), .groups = "drop")
+
+  make_cons_str <- function(unit_var, count_name) {
+    dist_to_cons |>
+      left_join(cons_hh_wts, by = "constituency") |>
+      left_join(
+        raw_iddetail |>
+          group_by(district) |>
+          summarise(dist_str = sum(.data[[unit_var]], na.rm = TRUE), .groups = "drop"),
+        by = "district"
+      ) |>
+      group_by(district) |>
+      mutate(cons_share = hh_wt / sum(hh_wt, na.rm = TRUE)) |>
+      ungroup() |>
+      group_by(constituency) |>
+      summarise(!!count_name := sum(dist_str * cons_share, na.rm = TRUE), .groups = "drop")
+  }
+
+  cons_str       <- make_cons_str("str_unit",      "str_count")
+  cons_str_broad <- make_cons_str("str_unit_broad", "str_count_broad")
+
+  # ── 6. Constituency and Panel Data ──────────────────────────────────────────
+  cons_2022 <- hh_2022 |>
+    filter(!is.na(hh_weight)) |>
+    group_by(constituency) |>
+    summarise(
+      renter_rate_22   = weighted.mean(renter,              hh_weight, na.rm = TRUE),
+      owner_rate_22    = weighted.mean(owner,               hh_weight, na.rm = TRUE),
+      rentfree_rate_22 = weighted.mean(rentfree,            hh_weight, na.rm = TRUE),
+      hh_size_22       = weighted.mean(household_size,      hh_weight, na.rm = TRUE),
+      ppbr_22          = weighted.mean(persons_per_bedroom, hh_weight, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  cons_2010 <- hh_2010 |>
+    filter(!is.na(hh_weight)) |>
+    group_by(constituency) |>
+    summarise(
+      renter_rate_10   = weighted.mean(renter,              hh_weight, na.rm = TRUE),
+      owner_rate_10    = weighted.mean(owner,               hh_weight, na.rm = TRUE),
+      rentfree_rate_10 = weighted.mean(rentfree,            hh_weight, na.rm = TRUE),
+      hh_size_10       = weighted.mean(household_size,      hh_weight, na.rm = TRUE),
+      ppbr_10          = weighted.mean(persons_per_bedroom, hh_weight, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  cons_wide <- cons_2010 |>
+    left_join(cons_2022,       by = "constituency") |>
+    left_join(nte_data,        by = "constituency") |>
+    left_join(cons_str,        by = "constituency") |>
+    left_join(cons_str_broad,  by = "constituency") |>
+    mutate(
+      d_renter  = (renter_rate_22 - renter_rate_10) * 100,
+      d_owner   = (owner_rate_22  - owner_rate_10)  * 100,
+      d_hh_size = hh_size_22 - hh_size_10,
+      d_ppbr    = ppbr_22    - ppbr_10
+    )
+
+  write.csv(cons_wide, "cons_wide.csv", row.names = FALSE)
+
+  panel <- bind_rows(
+    cons_2010 |>
+      left_join(nte_data, by = "constituency") |>
+      mutate(year = 2010, post = 0,
+             renter_rate = renter_rate_10, owner_rate = owner_rate_10,
+             rentfree_rate = rentfree_rate_10, hh_size = hh_size_10, ppbr = ppbr_10,
+             str_count = 0, str_count_broad = 0),
+    cons_2022 |>
+      left_join(nte_data,       by = "constituency") |>
+      left_join(cons_str,       by = "constituency") |>
+      left_join(cons_str_broad, by = "constituency") |>
+      mutate(year = 2022, post = 1,
+             renter_rate = renter_rate_22, owner_rate = owner_rate_22,
+             rentfree_rate = rentfree_rate_22, hh_size = hh_size_22, ppbr = ppbr_22)
+  ) |>
+    mutate(nte_post = nte * national_shift * post)
+
+  hh_panel <- bind_rows(
+    hh_2010 |> mutate(year = 2010L, post = 0L),
+    hh_2022 |> mutate(year = 2022L, post = 1L)
+  ) |>
+    left_join(nte_data |> select(constituency, nte), by = "constituency") |>
+    left_join(panel    |> select(constituency, year, str_count, str_count_broad),
+              by = c("constituency", "year")) |>
+    mutate(nte_post = nte * national_shift * post)
+
+  write.csv(
+    hh_panel |> select(renter, owner, rentfree, persons_per_bedroom,
+                       monthly_rent, tenure, bedrooms, household_size,
+                       constituency, year, post, hh_weight,
+                       nte, nte_post, str_count, str_count_broad),
+    "hh_panel_replication.csv", row.names = FALSE
+  )
+
+  # ── 7. District-Level Data ───────────────────────────────────────────────────
+  dist_wide <- cons_wide |>
+    left_join(cons_to_dist, by = "constituency") |>
+    left_join(cons_hh_wts,  by = "constituency") |>
+    group_by(district) |>
+    summarise(
+      renter_rate_10 = weighted.mean(renter_rate_10, hh_wt, na.rm = TRUE),
+      renter_rate_22 = weighted.mean(renter_rate_22, hh_wt, na.rm = TRUE),
+      d_renter       = (renter_rate_22 - renter_rate_10) * 100,
+      .groups = "drop"
+    )
+
+  write.csv(dist_wide, "dist_wide.csv", row.names = FALSE)
+
+  dist_str_direct <- raw_iddetail |>
+    mutate(
+      district_h = case_when(
+        district %in% c("AnselaRaye", "Canaries") ~ "Anse-la-Raye",
+        district == "VieuxFort"                   ~ "Vieux Fort",
+        district == "GrosIslet"                   ~ "Gros Islet",
+        TRUE                                      ~ district
+      )
+    ) |>
+    group_by(district = district_h) |>
+    summarise(
+      str_count_d       = sum(str_unit,       na.rm = TRUE),
+      str_count_broad_d = sum(str_unit_broad, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  hh_panel_dist <- hh_panel |>
+    left_join(cons_to_dist, by = "constituency") |>
+    left_join(nte_dist,      by = "district") |>
+    left_join(
+      bind_rows(
+        dist_str_direct |> mutate(year = 2022L),
+        dist_str_direct |> mutate(year = 2010L, str_count_d = 0, str_count_broad_d = 0)
+      ),
+      by = c("district", "year")
+    ) |>
+    mutate(nte_post_dist = nte_dist * national_shift * post)
+
+  dist_panel_agg <- bind_rows(
+    dist_wide |>
+      left_join(nte_dist, by = "district") |>
+      mutate(year = 2010, post = 0, str_count_d = 0, str_count_broad_d = 0),
+    dist_wide |>
+      left_join(nte_dist,        by = "district") |>
+      left_join(dist_str_direct, by = "district") |>
+      mutate(year = 2022, post = 1)
+  ) |>
+    mutate(nte_post_dist = nte_dist * national_shift * post)
+
+  dist_plot <- dist_wide |> left_join(nte_dist, by = "district")
+
+} else {
+
+  # ── Precomputed CSV path ─────────────────────────────────────────────────────
+  message("SAV files not found — loading pre-processed CSVs for full replication")
+
+  hh_panel  <- read.csv("hh_panel_replication.csv")
+  cons_wide <- read.csv("cons_wide.csv")
+  dist_wide <- read.csv("dist_wide.csv")
+
+  cons_str       <- cons_wide |> select(constituency, str_count)
+  cons_str_broad <- cons_wide |> select(constituency, str_count_broad)
+
+  panel <- bind_rows(
+    cons_wide |> mutate(year = 2010, post = 0, str_count = 0, str_count_broad = 0),
+    cons_wide |> mutate(year = 2022, post = 1)
+  ) |> mutate(nte_post = nte * national_shift * post)
+
+  dist_str_direct <- read.csv("iddetail_str.csv") |>
+    mutate(
+      district_h = case_when(
+        district %in% c("AnselaRaye", "Canaries") ~ "Anse-la-Raye",
+        district == "VieuxFort"                   ~ "Vieux Fort",
+        district == "GrosIslet"                   ~ "Gros Islet",
+        TRUE                                      ~ district
+      )
+    ) |>
+    group_by(district = district_h) |>
+    summarise(
+      str_count_d       = sum(str_unit,       na.rm = TRUE),
+      str_count_broad_d = sum(str_unit_broad, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  hh_panel_dist <- hh_panel |>
+    left_join(cons_to_dist, by = "constituency") |>
+    left_join(nte_dist,      by = "district") |>
+    left_join(
+      bind_rows(
+        dist_str_direct |> mutate(year = 2022L),
+        dist_str_direct |> mutate(year = 2010L, str_count_d = 0, str_count_broad_d = 0)
+      ),
+      by = c("district", "year")
+    ) |>
+    mutate(nte_post_dist = nte_dist * national_shift * post)
+
+  dist_panel_agg <- bind_rows(
+    dist_wide |>
+      left_join(nte_dist, by = "district") |>
+      mutate(year = 2010, post = 0, str_count_d = 0, str_count_broad_d = 0),
+    dist_wide |>
+      left_join(nte_dist,        by = "district") |>
+      left_join(dist_str_direct, by = "district") |>
+      mutate(year = 2022, post = 1)
+  ) |>
+    mutate(nte_post_dist = nte_dist * national_shift * post)
+
+  dist_plot    <- dist_wide |> left_join(nte_dist, by = "district")
+  hh_2022      <- hh_panel  |> filter(year == 2022)
+  raw_iddetail <- NULL
+
+}
 
 # ── 8. Core Regression Models ─────────────────────────────────────────────────
 
@@ -531,8 +603,8 @@ print(arrivals_detail)
 
 # ── 11. Descriptive Tables ────────────────────────────────────────────────────
 
-# Table 3: DwellingStatus distribution
-dwellstatus_tbl <- raw_iddetail |>
+# Table 3: DwellingStatus distribution (requires .sav path)
+if (!is.null(raw_iddetail)) dwellstatus_tbl <- raw_iddetail |>
   count(DwellingStatus) |>
   arrange(DwellingStatus) |>
   mutate(
@@ -563,7 +635,7 @@ dwellstatus_tbl <- raw_iddetail |>
   ) |>
   select(Code = DwellingStatus, Label = label, `STR Role` = str_role, N = n, `%` = pct)
 
-print(dwellstatus_tbl)
+if (!is.null(raw_iddetail)) print(dwellstatus_tbl)
 
 # Table 6 (thesis): Constituency-level housing outcomes
 constituency_outcomes <- cons_wide |>
