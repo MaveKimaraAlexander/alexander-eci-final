@@ -68,12 +68,7 @@ install.packages(c("haven", "labelled"))
 The three `.sav` census files are required to run the full script. If you do not have them, `hh_panel_replication.csv` and `iddetail_str.csv` (included in this repo) contain all variables needed to reproduce every regression and figure — no `.sav` files required.
 
 1. Obtain the three confidential `.sav` files from the CSO and place them in the same directory as the R script (or skip this step if using the pre-processed CSVs).
-2. Open `eci_str_replication.R` and update the `setwd()` path at the top of the script to match your local directory:
-
-```r
-setwd("path/to/your/project")
-```
-
+2. Open `eci_str_replication.R` in RStudio — the working directory is set automatically to the script's location. Alternatively, run from the terminal with `Rscript eci_str_replication.R` from the repo root.
 3. Run the script top-to-bottom. Figures are saved as PNG files in the working directory; regression tables print to the console.
 
 ### Rendering the full PDF

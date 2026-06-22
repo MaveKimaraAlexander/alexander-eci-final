@@ -28,8 +28,12 @@
 # ==============================================================================
 
 # ── 0. Working Directory ──────────────────────────────────────────────────────
-# Update this path if you move the data files
-setwd("C:/Users/mavek/OneDrive/Desktop/IMBA Douments/semester 4/Thesis/Thesis Data")
+# In RStudio: sets to the folder containing this script automatically.
+# Via Rscript from terminal: run from the repo root (no change needed).
+tryCatch(
+  setwd(dirname(rstudioapi::getActiveDocumentContext()$path)),
+  error = function(e) invisible(NULL)
+)
 
 # ── 0. Libraries ──────────────────────────────────────────────────────────────
 library(tidyverse)
