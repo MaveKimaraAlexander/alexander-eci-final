@@ -480,37 +480,6 @@ Together these questions trace the full arc of platform-driven housing disruptio
 
 \newpage
 
-# Literature Review
-
-## Platform Economics and the Short-Term Rental Market
-
-Space Holder
-
-## Competitive Disruption in Small Island Accommodation Markets
-
-Space Holder
-
-## Methodological Foundations: Causal Inference and Market Dynamics
-
-Space Holder 
-
-\newpage
-
-# Theoretical Framework
-
-## The Causal Mechanism: From Platform Entry to Housing Affordability
-
-Space Holder 
-
-## Market Failure and the Social Cost of STR Conversion
-
-Space Holder
-
-## Aggregate Dynamics and Theoretical Predictions
-Space Holder 
-
-\newpage
-
 # Methodology
 
 ## Data Sources
